@@ -1,0 +1,10 @@
+{
+  "id": "gemihub",
+  "name": "GemiHub - Drive Sync",
+  "minAppVersion": "1.10.0",
+  "description": "Sync your Obsidian vault with Google Drive via GemiHub.",
+  "author": "takeshy",
+  "authorUrl": "https://github.com/takeshy",
+  "isDesktopOnly": false,
+  "version": "0.1.0"
+}

@@ -1,0 +1,355 @@
+/* GemiHub - Drive Sync styles */
+
+/* Utility */
+.gemihub-hidden {
+  display: none !important;
+}
+
+/* Drive Sync Ribbon Badge */
+.gemihub-drive-sync-ribbon {
+  position: relative;
+}
+
+.gemihub-sync-badge {
+  position: absolute;
+  top: 2px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: 9px;
+  font-weight: bold;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* Drive Sync Status Bar */
+.gemihub-drive-sync-status {
+  cursor: pointer;
+}
+
+/* Settings: Backup Token Input */
+.gemihub-backup-token-input {
+  width: 300px;
+}
+
+/* Modal Actions (Confirm dialog) */
+.gemihub-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* Button Container (Conflict modal bulk actions) */
+.gemihub-button-container {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+/* ========================================
+   Sync Diff Modal
+   ======================================== */
+
+.gemihub-sync-diff-modal {
+  max-width: 800px;
+}
+
+.gemihub-sync-diff-list {
+  max-height: 400px;
+  overflow-y: auto;
+  margin: 8px 0;
+}
+
+.gemihub-sync-diff-file {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.gemihub-sync-diff-file:last-child {
+  border-bottom: none;
+}
+
+.gemihub-sync-diff-file-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+.gemihub-sync-diff-file-header:hover {
+  background: var(--background-modifier-hover);
+}
+
+.gemihub-sync-diff-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.gemihub-sync-diff-new {
+  color: var(--text-success);
+}
+
+.gemihub-sync-diff-modified {
+  color: var(--text-accent);
+}
+
+.gemihub-sync-diff-deleted {
+  color: var(--text-error);
+}
+
+.gemihub-sync-diff-edit-deleted {
+  color: var(--text-warning);
+}
+
+.gemihub-sync-diff-conflict {
+  color: var(--text-muted);
+}
+
+.gemihub-sync-diff-conflict-tag {
+  color: var(--text-muted);
+  background: var(--background-modifier-border);
+}
+
+.gemihub-sync-diff-file.is-conflict {
+  opacity: 0.6;
+}
+
+.gemihub-sync-diff-file.gemihub-sync-diff-ignored {
+  opacity: 0.5;
+}
+
+.gemihub-sync-diff-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.gemihub-sync-diff-tag {
+  font-size: 11px;
+  color: var(--text-warning);
+  background: var(--background-modifier-hover);
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.gemihub-sync-diff-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.gemihub-sync-diff-toggle:first-of-type {
+  margin-left: auto;
+}
+
+.gemihub-sync-diff-toggle:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.gemihub-sync-diff-no-diff {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+
+.gemihub-sync-diff-panel {
+  border-top: 1px solid var(--background-modifier-border);
+  margin: 0 8px 8px;
+}
+
+.gemihub-sync-diff-loading {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.gemihub-sync-diff-error {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-error);
+  font-size: 13px;
+}
+
+.gemihub-sync-diff-content {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  margin: 0;
+  padding: 8px 0;
+}
+
+.gemihub-sync-diff-content > div {
+  padding: 0 8px;
+  white-space: pre;
+  min-height: 1.5em;
+}
+
+.gemihub-sync-diff-content .gemihub-diff-add {
+  background: rgba(0, 200, 83, 0.15);
+  color: var(--color-green);
+}
+
+.gemihub-sync-diff-content .gemihub-diff-remove {
+  background: rgba(255, 100, 100, 0.15);
+  color: var(--color-red);
+}
+
+.gemihub-sync-diff-content .gemihub-diff-hunk {
+  color: var(--text-accent);
+  background: var(--background-modifier-hover);
+  margin: 4px 0;
+  padding: 2px 8px;
+}
+
+.gemihub-sync-diff-content .gemihub-diff-header {
+  color: var(--text-faint);
+}
+
+.theme-dark .gemihub-sync-diff-content .gemihub-diff-add {
+  background: rgba(0, 200, 83, 0.12);
+}
+
+.theme-dark .gemihub-sync-diff-content .gemihub-diff-remove {
+  background: rgba(255, 100, 100, 0.12);
+}
+
+/* ========================================
+   Conflict Modal
+   ======================================== */
+
+.gemihub-conflict-modal {
+  max-width: 800px;
+}
+
+.gemihub-conflict-item {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.gemihub-conflict-item:last-child {
+  border-bottom: none;
+}
+
+.gemihub-conflict-item .setting-item {
+  border-bottom: none;
+}
+
+.gemihub-conflict-item .setting-item-control {
+  gap: 8px;
+}
+
+.gemihub-conflict-resolving-status {
+  text-align: center;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+/* ========================================
+   Diff Prefix (non-selectable +/- prefix)
+   ======================================== */
+
+.gemihub-diff-prefix {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ========================================
+   Drive Management Modals (Temp, Conflict Backup, Trash)
+   ======================================== */
+
+.gemihub-drive-manage-modal .gemihub-drive-file-list {
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  margin: 8px 0;
+}
+
+.gemihub-drive-manage-modal .gemihub-drive-file-list .setting-item {
+  padding: 8px 12px;
+}
+
+.gemihub-drive-manage-modal .gemihub-drive-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.gemihub-drive-manage-modal .gemihub-drive-modal-processing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  gap: 12px;
+  color: var(--text-muted);
+}
+
+.gemihub-drive-manage-modal .gemihub-drive-modal-processing .spinner {
+  display: inline-block;
+  width: 24px;
+  height: 24px;
+  border: 3px solid var(--background-modifier-border);
+  border-top-color: var(--interactive-accent);
+  border-radius: 50%;
+  animation: gemihub-spin 0.8s linear infinite;
+}
+
+@keyframes gemihub-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.gemihub-drive-manage-modal .gemihub-drive-preview-panel {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  margin: 0 0 4px;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.gemihub-drive-manage-modal .gemihub-drive-preview-panel pre {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.gemihub-drive-manage-modal .gemihub-drive-preview-loading {
+  padding: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
