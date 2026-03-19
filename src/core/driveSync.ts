@@ -848,6 +848,10 @@ export class DriveSyncManager {
     } else {
       for (const id of diff.remoteOnly) {
         const name = remoteFiles[id]?.name || id;
+        // Skip files that already exist locally with matching content
+        const remoteChecksum = remoteFiles[id]?.md5Checksum;
+        const localChecksum = checksums.get(name);
+        if (localChecksum && remoteChecksum && localChecksum === remoteChecksum) continue;
         files.push({ id, name, type: "new" });
       }
       for (const id of diff.toPull) {
@@ -1202,15 +1206,24 @@ export class DriveSyncManager {
       const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds);
       diff.toPull.push(...missingLocal);
 
-      // 3.5. Guard: detect untracked local files that would be overwritten
+      // 3.5. Guard: detect untracked local files that would be overwritten,
+      //       and skip files that already exist locally with matching content.
       const safeRemoteOnly: string[] = [];
+      const alreadyMatchedIds: string[] = [];
       const untrackedConflicts: ConflictInfo[] = [];
       for (const fileId of diff.remoteOnly) {
         const fileMeta = remoteMeta.files[fileId];
         if (!fileMeta) { safeRemoteOnly.push(fileId); continue; }
         const vaultPath = fileMeta.name;
         const localChecksum = checksums.get(vaultPath);
-        if (localChecksum && localChecksum !== fileMeta.md5Checksum) {
+        if (!localChecksum) {
+          // File doesn't exist locally — need to download
+          safeRemoteOnly.push(fileId);
+        } else if (localChecksum === fileMeta.md5Checksum) {
+          // Same content already exists locally — skip download, just track in metadata
+          alreadyMatchedIds.push(fileId);
+        } else {
+          // Different content — conflict
           untrackedConflicts.push({
             fileId,
             fileName: vaultPath,
@@ -1219,11 +1232,23 @@ export class DriveSyncManager {
             localModifiedTime: "",
             remoteModifiedTime: fileMeta.modifiedTime,
           });
-        } else {
-          safeRemoteOnly.push(fileId);
         }
       }
       diff.remoteOnly = safeRemoteOnly;
+
+      // Track already-matched files in local metadata (no download needed)
+      if (alreadyMatchedIds.length > 0) {
+        for (const fileId of alreadyMatchedIds) {
+          const fileMeta = remoteMeta.files[fileId];
+          if (!fileMeta) continue;
+          localMeta.pathToId[fileMeta.name] = fileId;
+          localMeta.files[fileId] = {
+            md5Checksum: fileMeta.md5Checksum,
+            modifiedTime: fileMeta.modifiedTime ?? "",
+            name: fileMeta.name,
+          };
+        }
+      }
 
       const catchAllPlan = this.planCatchAllPullActions(localMeta, remoteMeta, diff, checksums, ignoredIds);
       if (catchAllPlan.blockedRenames.length > 0) {
