@@ -214,7 +214,7 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
   // Only show sync actions if unlocked
   if (!syncManager?.isUnlocked) return;
 
-  // Push / Pull / Full Pull buttons
+  // Full Push / Full Pull buttons
   const isSyncing = syncManager.syncStatus !== "idle";
   const statusText = `Status: ${syncManager.syncStatus} | Local changes: ${syncManager.localModifiedCount} | Remote changes: ${syncManager.remoteModifiedCount}`;
 
@@ -230,42 +230,40 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
 
   syncActionSetting
     .addButton((btn) =>
-      btn.setButtonText(t("driveSync.push")).setDisabled(isSyncing).onClick(() => {
+      btn.setButtonText(t("driveSync.fullPush")).setWarning().setDisabled(isSyncing).onClick(() => {
         void (async () => {
+          const confirmed = await new ConfirmModal(
+            app,
+            t("driveSync.fullPushConfirm"),
+            t("driveSync.fullPush"),
+            t("common.cancel")
+          ).openAndWait();
+          if (!confirmed) return;
           disableAllSyncButtons();
-          await plugin.driveSyncUI.showSyncDiffAndExecute(syncManager, "push");
+          await syncManager.fullPush();
           display();
         })();
       })
     )
     .addButton((btn) =>
       btn
-        .setButtonText(t("driveSync.pull"))
-        .setCta()
+        .setButtonText(t("driveSync.fullPull"))
+        .setWarning()
         .setDisabled(isSyncing)
         .onClick(() => {
           void (async () => {
+            const confirmed = await new ConfirmModal(
+              app,
+              t("driveSync.fullPullConfirm"),
+              t("driveSync.fullPull"),
+              t("common.cancel")
+            ).openAndWait();
+            if (!confirmed) return;
             disableAllSyncButtons();
-            await plugin.driveSyncUI.showSyncDiffAndExecute(syncManager, "pull");
+            await syncManager.fullPull();
             display();
           })();
         })
-    )
-    .addButton((btn) =>
-      btn.setButtonText(t("driveSync.fullPull")).setWarning().setDisabled(isSyncing).onClick(() => {
-        void (async () => {
-          const confirmed = await new ConfirmModal(
-            app,
-            t("driveSync.fullPullConfirm"),
-            t("driveSync.fullPull"),
-            t("common.cancel")
-          ).openAndWait();
-          if (!confirmed) return;
-          disableAllSyncButtons();
-          await syncManager.fullPull();
-          display();
-        })();
-      })
     );
 
   new Setting(containerEl)
