@@ -31,6 +31,12 @@ export class GemiHubPlugin extends Plugin {
     this.setupDriveSyncUI();
     this.registerCommands();
     this.registerFileMenu();
+
+    this.app.workspace.onLayoutReady(() => {
+      if (this.driveSyncManager?.isConfigured && !this.driveSyncManager.isUnlocked) {
+        void this.promptDriveSyncUnlock();
+      }
+    });
   }
 
   onunload(): void {
