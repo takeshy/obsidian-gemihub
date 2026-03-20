@@ -5,21 +5,10 @@ import { Modal, App, Setting, Notice } from "obsidian";
 import type { DriveSyncManager } from "src/core/driveSync";
 import type { DriveFile } from "src/core/googleDrive";
 import { isBinaryExtension } from "src/core/driveSyncUtils";
+import { restorePathFromConflictBackupName } from "src/core/driveSyncMeta";
 import { t } from "src/i18n";
 import { formatError } from "src/utils/error";
 import { ConfirmModal } from "./ConfirmModal";
-
-/**
- * Strip timestamp suffix from conflict backup name.
- * e.g., "folder_file_20260207_143000.md" → "folder_file.md"
- */
-function stripTimestampFromName(name: string): string {
-  const match = name.match(/^(.+)_(\d{8}_\d{6})(\.[^.]+)?$/);
-  if (match) {
-    return match[1] + (match[3] ?? "");
-  }
-  return name;
-}
 
 export class DriveConflictBackupModal extends Modal {
   private syncManager: DriveSyncManager;
@@ -86,8 +75,9 @@ export class DriveConflictBackupModal extends Modal {
     const listEl = contentEl.createDiv({ cls: "gemihub-drive-file-list" });
     for (const file of this.files) {
       const desc = file.modifiedTime ? new Date(file.modifiedTime).toLocaleString() : "";
+      const displayName = restorePathFromConflictBackupName(file.name);
       new Setting(listEl)
-        .setName(file.name)
+        .setName(displayName)
         .setDesc(desc)
         .addButton((btn) =>
           btn.setButtonText(t("driveSync.preview")).onClick(() => {
@@ -172,7 +162,7 @@ export class DriveConflictBackupModal extends Modal {
     for (const fileId of this.selected) {
       const file = this.files.find((f) => f.id === fileId);
       if (!file) continue;
-      const restoreName = stripTimestampFromName(file.name);
+      const restoreName = restorePathFromConflictBackupName(file.name);
       try {
         await this.syncManager.restoreConflictFile(fileId, restoreName);
         count++;

@@ -201,17 +201,39 @@ export async function saveConflictBackup(
   content: string | ArrayBuffer
 ): Promise<void> {
   const folderId = await ensureSubFolder(accessToken, rootFolderId, "sync_conflicts");
-  const now = new Date();
-  const ts = now.toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
-  const safeName = fileName.replace(/\//g, "_");
-  const dotIdx = safeName.lastIndexOf(".");
-  const backupName = dotIdx > 0
-    ? `${safeName.slice(0, dotIdx)}_${ts}${safeName.slice(dotIdx)}`
-    : `${safeName}_${ts}`;
+  const backupName = buildConflictBackupName(fileName);
   if (content instanceof ArrayBuffer) {
     await createFileBinary(accessToken, backupName, content, folderId);
   } else {
     await createFile(accessToken, backupName, content, folderId, "text/plain");
+  }
+}
+
+export function buildConflictBackupName(filePath: string, now: Date = new Date()): string {
+  const ts = now.toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
+  const encodedPath = encodeURIComponent(filePath);
+  const dotIdx = encodedPath.lastIndexOf(".");
+  const backupName = dotIdx > 0
+    ? `${encodedPath.slice(0, dotIdx)}_${ts}${encodedPath.slice(dotIdx)}`
+    : `${encodedPath}_${ts}`;
+  return backupName;
+}
+
+export function restorePathFromConflictBackupName(name: string): string {
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
+export function restoreOriginalPathFromConflictBackupName(name: string): string {
+  const match = name.match(/^(.+)_(\d{8}_\d{6})(\.[^.]+)?$/);
+  const baseName = match ? match[1] + (match[3] ?? "") : name;
+  try {
+    return decodeURIComponent(baseName);
+  } catch {
+    return baseName;
   }
 }
 

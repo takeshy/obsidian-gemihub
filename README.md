@@ -144,7 +144,7 @@ Files deleted during sync are moved to the `trash/` folder on Drive instead of b
 
 When conflicts are resolved, the losing version is saved in `sync_conflicts/` on Drive. You can:
 
-- **Restore** - Restore a backup to the root folder (overwrites the current version)
+- **Restore** - Restore a backup to the local vault as a timestamped file, keeping the current file untouched
 - **Delete** - Permanently remove backups
 
 ![Conflict Backups](docs/images/gemihub_connection/conflict_backup.png)

@@ -233,10 +233,7 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
       btn.setButtonText(t("driveSync.push")).setDisabled(isSyncing).onClick(() => {
         void (async () => {
           disableAllSyncButtons();
-          await syncManager.push();
-          if (syncManager.syncStatus === "conflict") {
-            openConflictModal(app, syncManager, display);
-          }
+          await plugin.driveSyncUI.showSyncDiffAndExecute(syncManager, "push");
           display();
         })();
       })
@@ -249,10 +246,7 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
         .onClick(() => {
           void (async () => {
             disableAllSyncButtons();
-            await syncManager.pull();
-            if (syncManager.syncStatus === "conflict") {
-              openConflictModal(app, syncManager, display);
-            }
+            await plugin.driveSyncUI.showSyncDiffAndExecute(syncManager, "pull");
             display();
           })();
         })

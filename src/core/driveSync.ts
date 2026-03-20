@@ -38,6 +38,7 @@ import {
   removeFileFromMeta,
   saveConflictBackup,
   buildIdToPathMap,
+  restorePathFromConflictBackupName,
   type LocalDriveSyncMeta,
 } from "./driveSyncMeta";
 import {
@@ -1659,6 +1660,7 @@ export class DriveSyncManager {
 
       // Read existing local meta to reuse Drive file IDs
       const oldLocalMeta = await readLocalSyncMeta(this.app);
+      const existingRemoteFiles = await drive.listUserFiles(accessToken, rootFolderId);
 
       // Get all vault files and compute checksums
       const vaultFiles = this.getAllVaultFiles();
@@ -1677,6 +1679,16 @@ export class DriveSyncManager {
         }));
       }
 
+      // Move remote-only files to trash so full push makes Drive match the local vault.
+      const trackedIds = new Set(Object.keys(remoteMeta.files));
+      const filesToTrash = existingRemoteFiles.filter((file) => !trackedIds.has(file.id));
+      if (filesToTrash.length > 0) {
+        const trashFolderId = await drive.ensureSubFolder(accessToken, rootFolderId, "trash");
+        for (const file of filesToTrash) {
+          await drive.moveFile(accessToken, file.id, trashFolderId, rootFolderId);
+        }
+      }
+
       // Write updated remote meta
       remoteMeta.lastUpdatedAt = new Date().toISOString();
       await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
@@ -1686,7 +1698,8 @@ export class DriveSyncManager {
       await writeLocalSyncMeta(this.app, updatedLocalMeta);
 
       this.syncStatus = "idle";
-      new Notice(`Drive sync: full push completed (${uploadedCount} files)`);
+      const detail = filesToTrash.length > 0 ? `, ${filesToTrash.length} trashed` : "";
+      new Notice(`Drive sync: full push completed (${uploadedCount} files${detail})`);
     } catch (err) {
       this.lastError = formatError(err);
       this.syncStatus = "error";
@@ -1946,32 +1959,29 @@ export class DriveSyncManager {
   async restoreConflictFile(fileId: string, restoreName: string): Promise<void> {
     const tokens = await this.getTokens();
     const { accessToken } = tokens;
-    const isBinary = isBinaryExtension(restoreName);
+    const restorePath = restorePathFromConflictBackupName(restoreName);
+    const isBinary = isBinaryExtension(restorePath);
 
-    // Read conflict backup content from Drive and write to local vault only.
-    // The file will be pushed to Drive on the next push.
-    const dirPath = restoreName.substring(0, restoreName.lastIndexOf("/"));
+    // Restore the backup as a timestamped local file and keep the current file untouched.
+    const dirPath = restorePath.substring(0, restorePath.lastIndexOf("/"));
     if (dirPath) await this.ensureVaultFolder(dirPath);
 
-    const existingLocal = this.app.vault.getAbstractFileByPath(restoreName);
+    const existingLocal = this.app.vault.getAbstractFileByPath(restorePath);
     if (isBinary) {
       const content = await drive.readFileRaw(accessToken, fileId);
       if (existingLocal instanceof TFile) {
         await this.app.vault.modifyBinary(existingLocal, content);
       } else {
-        await this.app.vault.createBinary(restoreName, content);
+        await this.app.vault.createBinary(restorePath, content);
       }
     } else {
       const content = await drive.readFile(accessToken, fileId);
       if (existingLocal instanceof TFile) {
         await this.app.vault.modify(existingLocal, content);
       } else {
-        await this.app.vault.create(restoreName, content);
+        await this.app.vault.create(restorePath, content);
       }
     }
-
-    // Delete the conflict backup file from Drive
-    await drive.deleteFile(accessToken, fileId);
   }
 
   async deleteConflictFiles(fileIds: string[]): Promise<number> {
