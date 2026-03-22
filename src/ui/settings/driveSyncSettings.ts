@@ -1,8 +1,6 @@
 import { Setting, Notice } from "obsidian";
-import type { DriveSyncManager } from "src/core/driveSync";
 import { t } from "src/i18n";
 import { ConfirmModal } from "src/ui/components/ConfirmModal";
-import { DriveSyncConflictModal } from "src/ui/components/DriveSyncConflictModal";
 import { DriveAuthPasswordModal } from "src/ui/components/DriveAuthPasswordModal";
 import { DriveTrashModal } from "src/ui/components/DriveTrashModal";
 import { DriveConflictBackupModal } from "src/ui/components/DriveConflictBackupModal";
@@ -292,22 +290,4 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
         new DriveTrashModal(app, syncManager, () => display()).open();
       })
     );
-}
-
-function openConflictModal(
-  app: import("obsidian").App,
-  syncManager: DriveSyncManager,
-  display: () => void
-): void {
-  new DriveSyncConflictModal(
-    app,
-    syncManager,
-    syncManager.conflicts,
-    () => {
-      if (syncManager.syncStatus === "conflict") {
-        openConflictModal(app, syncManager, display);
-      }
-      display();
-    }
-  ).open();
 }
