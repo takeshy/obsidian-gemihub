@@ -696,9 +696,20 @@ export class DriveSyncManager {
         this.remoteModifiedCount = 0;
       } else {
         const pullLocalOnly = diff.localOnly.filter(id => id in localMeta.files);
+        // Filter remoteOnly: skip files that already exist locally with matching content
+        // (matches computeSyncFileList logic)
+        const remoteOnlyCount = diff.remoteOnly.filter(id => {
+          if (isExcludedId(id)) return false;
+          const name = remoteFiles[id]?.name;
+          if (!name) return true;
+          const remoteChecksum = remoteFiles[id]?.md5Checksum;
+          const localChecksum = checksums.get(name);
+          if (localChecksum && remoteChecksum && localChecksum === remoteChecksum) return false;
+          return true;
+        }).length;
         this.remoteModifiedCount =
           diff.toPull.filter(id => !isExcludedId(id)).length
-          + diff.remoteOnly.filter(id => !isExcludedId(id)).length
+          + remoteOnlyCount
           + pullLocalOnly.filter(id => !isExcludedId(id)).length
           + diff.editDeleteConflicts.filter(id => !isExcludedId(id)).length
           + diff.conflicts.filter(c => !isExcludedId(c.fileId)).length;
