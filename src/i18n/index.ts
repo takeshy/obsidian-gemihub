@@ -380,7 +380,7 @@ export function t(key: string, vars?: Record<string, string>): string {
   let text = locales[locale]?.[key] ?? locales.en[key] ?? key;
   if (vars) {
     for (const [k, v] of Object.entries(vars)) {
-      text = text.replace(new RegExp(`\\{\\{${k}\\}\\}`, "g"), v);
+      text = text.split(`{{${k}}}`).join(v);
     }
   }
   return text;

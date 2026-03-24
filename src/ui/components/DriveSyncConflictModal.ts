@@ -99,6 +99,9 @@ export class DriveSyncConflictModal extends Modal {
 
     const itemEl = container.createDiv({ cls: "gemihub-conflict-item" });
 
+    // Declare diffPanel before use in click handler; element created after Setting for correct DOM order
+    let diffPanel: HTMLElement | null = null;
+
     const setting = new Setting(itemEl)
       .setName(conflict.fileName)
       .setDesc(desc);
@@ -110,7 +113,7 @@ export class DriveSyncConflictModal extends Modal {
         btn
           .setButtonText(t("driveSync.diff"))
           .onClick(() => {
-            void this.handleDiffToggle(conflict, diffPanel, btn.buttonEl);
+            if (diffPanel) void this.handleDiffToggle(conflict, diffPanel, btn.buttonEl);
           })
       );
     }
@@ -154,8 +157,10 @@ export class DriveSyncConflictModal extends Modal {
       );
     }
 
-    // Diff panel placed outside Setting, spans full width
-    const diffPanel = itemEl.createDiv({ cls: "gemihub-sync-diff-panel gemihub-hidden" });
+    // Diff panel placed after Setting for correct DOM order
+    if (canDiff) {
+      diffPanel = itemEl.createDiv({ cls: "gemihub-sync-diff-panel gemihub-hidden" });
+    }
   }
 
   private async handleDiffToggle(

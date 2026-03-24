@@ -444,8 +444,8 @@ export class DriveSyncManager {
     const newPaths = new Set<string>();
 
     // Track disappeared paths (in pathToId but file no longer exists at that path)
-    // Map: checksum → { fileId, oldPath }
-    const disappearedByChecksum = new Map<string, { fileId: string; oldPath: string }>();
+    // Map: checksum → array of { fileId, oldPath } (multiple files can share the same checksum)
+    const disappearedByChecksum = new Map<string, Array<{ fileId: string; oldPath: string }>>();
 
     // Build case-insensitive lookup for currentChecksums and pathToId (handles NTFS/macOS)
     const currentChecksumsLower = new Map<string, string>();
@@ -461,7 +461,9 @@ export class DriveSyncManager {
 
       if (!currentChecksum && trackedChecksum) {
         // File disappeared from this path — candidate for rename detection
-        disappearedByChecksum.set(trackedChecksum, { fileId, oldPath: path });
+        const arr = disappearedByChecksum.get(trackedChecksum) ?? [];
+        arr.push({ fileId, oldPath: path });
+        disappearedByChecksum.set(trackedChecksum, arr);
       } else if (currentChecksum && trackedChecksum && currentChecksum !== trackedChecksum) {
         modifiedIds.add(fileId);
       }
@@ -473,11 +475,12 @@ export class DriveSyncManager {
     for (const path of currentChecksums.keys()) {
       if (!localMeta.pathToId[path] && !pathToIdLower.has(path.toLowerCase())) {
         const checksum = currentChecksums.get(path)!;
-        const disappeared = disappearedByChecksum.get(checksum);
-        if (disappeared) {
+        const disappearedArr = disappearedByChecksum.get(checksum);
+        if (disappearedArr && disappearedArr.length > 0) {
           // Same checksum: this is a rename, not a new file
+          const disappeared = disappearedArr.shift()!;
           renames.set(disappeared.oldPath, path);
-          disappearedByChecksum.delete(checksum);
+          if (disappearedArr.length === 0) disappearedByChecksum.delete(checksum);
         } else {
           newPaths.add(path);
         }
@@ -486,8 +489,10 @@ export class DriveSyncManager {
 
     // Remaining disappeared entries are truly deleted files (not renamed)
     const deletedIds = new Set<string>();
-    for (const { fileId } of disappearedByChecksum.values()) {
-      deletedIds.add(fileId);
+    for (const arr of disappearedByChecksum.values()) {
+      for (const { fileId } of arr) {
+        deletedIds.add(fileId);
+      }
     }
 
     return { modifiedIds, newPaths, renames, deletedIds };
@@ -576,11 +581,12 @@ export class DriveSyncManager {
       ...diff.editDeleteConflicts,
       ...diff.conflicts.map((c) => c.fileId),
     ]);
+    // Use lowercase keys for case-insensitive matching (handles NTFS/macOS)
     const plannedRemovals = new Set<string>();
 
     for (const fileId of diff.localOnly) {
       const path = idToPath[fileId];
-      if (path) plannedRemovals.add(path);
+      if (path) plannedRemovals.add(path.toLowerCase());
     }
     for (const fileId of diff.toPull) {
       if (ignoredIds?.has(fileId)) continue;
@@ -588,7 +594,7 @@ export class DriveSyncManager {
       const remotePath = remoteMeta.files[fileId]?.name;
       if (oldPath && remotePath && oldPath !== remotePath
           && oldPath.toLowerCase() !== remotePath.toLowerCase()) {
-        plannedRemovals.add(oldPath);
+        plannedRemovals.add(oldPath.toLowerCase());
       }
     }
 
@@ -599,12 +605,12 @@ export class DriveSyncManager {
       const remoteFile = remoteMeta.files[id];
       if (!remoteFile) {
         deletes.push({ fileId: id, path });
-        plannedRemovals.add(path);
+        plannedRemovals.add(path.toLowerCase());
         continue;
       }
       if (remoteFile.name !== path && remoteFile.name.toLowerCase() !== path.toLowerCase()) {
         rawRenames.push({ fileId: id, oldPath: path, newPath: remoteFile.name });
-        plannedRemovals.add(path);
+        plannedRemovals.add(path.toLowerCase());
       }
     }
 
@@ -617,7 +623,7 @@ export class DriveSyncManager {
     for (const rename of rawRenames) {
       const targetOwnerId = localMeta.pathToId[rename.newPath]
         ?? pathToIdLowerMap.get(rename.newPath.toLowerCase());
-      if (targetOwnerId && targetOwnerId !== rename.fileId && !plannedRemovals.has(rename.newPath)) {
+      if (targetOwnerId && targetOwnerId !== rename.fileId && !plannedRemovals.has(rename.newPath.toLowerCase())) {
         blockedRenames.push(rename);
         continue;
       }
@@ -2078,7 +2084,9 @@ export class DriveSyncManager {
     };
 
     const tempFolderId = await drive.ensureSubFolder(accessToken, rootFolderId, "__TEMP__");
-    const fileName = vaultPath.split("/").pop() || vaultPath;
+    // Use full vault path with "/" replaced to avoid collisions between
+    // files with the same basename in different directories.
+    const fileName = vaultPath.split("/").join("%2F");
     const payloadJson = JSON.stringify(payload);
 
     // Overwrite if same name exists
