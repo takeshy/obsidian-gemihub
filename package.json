@@ -1,6 +1,6 @@
 {
   "name": "obsidian-gemihub",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Sync Obsidian vault with Google Drive via GemiHub",
   "main": "main.js",
   "scripts": {
