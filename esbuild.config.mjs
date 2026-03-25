@@ -14,6 +14,16 @@ const context = await esbuild.context({
   entryPoints: ["src/main.ts"],
   bundle: true,
   platform: "node",
+  inject: ["./process-shim.js"],
+  alias: {
+    "debug": "./debug-stub.js",
+    // Use browser version of @google/genai for mobile compatibility
+    "@google/genai": "@google/genai/web",
+  },
+  define: {
+    "process.env.NODE_ENV": JSON.stringify(prod ? "production" : "development"),
+    "global": "globalThis",
+  },
   external: [
     "obsidian",
     "electron",
