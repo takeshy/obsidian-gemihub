@@ -638,6 +638,36 @@ export class DriveSyncManager {
   }
 
   // ========================================
+  // Remote meta reconciliation
+  // ========================================
+
+  /**
+   * Read remote sync meta and reconcile with actual Drive file listing.
+   * Files deleted externally (GemiHub web, Drive UI, another device) may still
+   * be listed in _sync-meta.json; remove stale entries so pull can detect them.
+   * Writes corrected meta back to Drive if stale entries are found.
+   */
+  private async readReconciledRemoteMeta(
+    accessToken: string,
+    rootFolderId: string
+  ): Promise<SyncMeta | null> {
+    const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
+    if (!remoteMeta) return null;
+
+    const driveFiles = await drive.listUserFiles(accessToken, rootFolderId);
+    const driveFileIds = new Set(driveFiles.map(f => f.id));
+    const staleIds = Object.keys(remoteMeta.files).filter(id => !driveFileIds.has(id));
+    if (staleIds.length > 0) {
+      for (const id of staleIds) {
+        delete remoteMeta.files[id];
+      }
+      remoteMeta.lastUpdatedAt = new Date().toISOString();
+      await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
+    }
+    return remoteMeta;
+  }
+
+  // ========================================
   // Sync count refresh
   // ========================================
 
@@ -652,7 +682,7 @@ export class DriveSyncManager {
     try {
       const tokens = await this.getTokens();
       const localMeta = await readLocalSyncMeta(this.app);
-      const remoteMeta = await readRemoteSyncMeta(tokens.accessToken, tokens.rootFolderId);
+      const remoteMeta = await this.readReconciledRemoteMeta(tokens.accessToken, tokens.rootFolderId);
 
       const vaultFiles = this.getAllVaultFiles();
       const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
@@ -808,7 +838,7 @@ export class DriveSyncManager {
 
     const tokens = await this.getTokens();
     const localMeta = await readLocalSyncMeta(this.app);
-    const remoteMeta = await readRemoteSyncMeta(tokens.accessToken, tokens.rootFolderId);
+    const remoteMeta = await this.readReconciledRemoteMeta(tokens.accessToken, tokens.rootFolderId);
 
     const vaultFiles = this.getAllVaultFiles();
     const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
@@ -1202,9 +1232,9 @@ export class DriveSyncManager {
       const tokens = await this.getTokens();
       const { accessToken, rootFolderId } = tokens;
 
-      // 1. Get local and remote meta
+      // 1. Get local and remote meta (reconcile with actual Drive files to detect external deletions)
       const localMeta = await readLocalSyncMeta(this.app);
-      const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
+      const remoteMeta = await this.readReconciledRemoteMeta(accessToken, rootFolderId);
 
       if (!remoteMeta) {
         new Notice("Drive sync: no remote data found. Push first.");
