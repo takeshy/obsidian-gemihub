@@ -2,14 +2,16 @@
 // Shows file list with expandable diff view, similar to GemiHub's SyncDiffDialog.
 
 import { Modal, App, Setting, setIcon, TFile } from "obsidian";
-import { createTwoFilesPatch } from "diff";
 import type { SyncFileListItem, DriveSyncManager } from "src/core/driveSync";
 import { isBinaryExtension } from "src/core/driveSyncUtils";
 import { t } from "src/i18n";
+import { renderDiffView, createDiffViewToggle, type DiffRendererState } from "./DiffRenderer";
 
 interface DiffState {
   loading: boolean;
-  diff: string | null;
+  oldContent: string | null;
+  newContent: string | null;
+  diffRenderer: DiffRendererState | null;
   error: boolean;
   expanded: boolean;
 }
@@ -22,6 +24,19 @@ export class DriveSyncDiffModal extends Modal {
   private diffStates: Record<string, DiffState> = {};
   private ignoredIds: Set<string> = new Set();
   private headerTitleEl: HTMLElement | null = null;
+
+  // Drag state
+  private isDragging = false;
+  private dragStartX = 0;
+  private dragStartY = 0;
+  private modalStartX = 0;
+  private modalStartY = 0;
+
+  // Resize state
+  private isResizing = false;
+  private resizeDirection = "";
+  private resizeStartWidth = 0;
+  private resizeStartHeight = 0;
 
   constructor(
     app: App,
@@ -43,12 +58,17 @@ export class DriveSyncDiffModal extends Modal {
   }
 
   onOpen(): void {
-    const { contentEl } = this;
+    const { contentEl, modalEl } = this;
     contentEl.empty();
-    contentEl.addClass("gemihub-sync-diff-modal");
+    modalEl.addClass("gemihub-sync-diff-modal");
 
     const title = this.direction === "push" ? t("driveSync.pushChanges") : t("driveSync.pullChanges");
-    this.headerTitleEl = contentEl.createEl("h2", { text: `${title} (${this.files.length})` });
+    const header = contentEl.createDiv({ cls: "gemihub-sync-diff-header gemihub-drag-handle" });
+    this.headerTitleEl = header.createEl("h2", { text: `${title} (${this.files.length})` });
+
+    // Setup drag & resize
+    this.addResizeHandles(modalEl);
+    this.setupDrag(header, modalEl);
 
     if (this.files.length === 0) {
       contentEl.createEl("p", {
@@ -213,7 +233,7 @@ export class DriveSyncDiffModal extends Modal {
     const state = this.diffStates[file.id];
 
     // If already loaded, toggle visibility
-    if (state?.diff !== null && state?.diff !== undefined && !state.error) {
+    if (state?.oldContent !== null && state?.oldContent !== undefined && !state.error) {
       state.expanded = !state.expanded;
       panel.toggleClass("gemihub-hidden", !state.expanded);
       setIcon(chevronEl, state.expanded ? "chevron-down" : "chevron-right");
@@ -231,7 +251,7 @@ export class DriveSyncDiffModal extends Modal {
     }
 
     // Show loading
-    this.diffStates[file.id] = { loading: true, diff: null, error: false, expanded: true };
+    this.diffStates[file.id] = { loading: true, oldContent: null, newContent: null, diffRenderer: null, error: false, expanded: true };
     panel.toggleClass("gemihub-hidden", false);
     panel.empty();
     panel.createDiv({ cls: "gemihub-sync-diff-loading", text: t("driveSync.loading") });
@@ -269,8 +289,6 @@ export class DriveSyncDiffModal extends Modal {
       // Pull: old=Local, new=Drive(remote)
       let oldContent: string;
       let newContent: string;
-      const oldLabel = this.direction === "push" ? "Drive" : "Local";
-      const newLabel = this.direction === "push" ? "Local" : "Drive";
 
       if (file.type === "new") {
         oldContent = "";
@@ -283,52 +301,149 @@ export class DriveSyncDiffModal extends Modal {
         newContent = this.direction === "push" ? localContent : remoteContent;
       }
 
-      const patch = createTwoFilesPatch(
-        file.name,
-        file.name,
-        oldContent,
-        newContent,
-        oldLabel,
-        newLabel,
-        { context: 3 },
-      );
-
-      this.diffStates[file.id] = { loading: false, diff: patch, error: false, expanded: true };
       panel.empty();
-      this.renderDiffView(panel, patch);
+
+      // Render toggle + diff view
+      const defaultMode = (file.type === "new" || file.type === "deleted") ? "unified" : "split";
+      const toggleBar = panel.createDiv({ cls: "gemihub-sync-diff-toggle-bar" });
+      const diffState = renderDiffView(panel, oldContent, newContent, defaultMode);
+      createDiffViewToggle(toggleBar, diffState);
+
+      this.diffStates[file.id] = { loading: false, oldContent, newContent, diffRenderer: diffState, error: false, expanded: true };
     } catch {
-      this.diffStates[file.id] = { loading: false, diff: null, error: true, expanded: true };
+      this.diffStates[file.id] = { loading: false, oldContent: null, newContent: null, diffRenderer: null, error: true, expanded: true };
       panel.empty();
       panel.createDiv({ cls: "gemihub-sync-diff-error", text: t("driveSync.failedToLoadDiff") });
     }
   }
 
-  private renderDiffView(container: HTMLElement, patch: string): void {
-    const pre = container.createEl("pre", { cls: "gemihub-sync-diff-content" });
-    const lines = patch.split("\n");
-
-    for (const line of lines) {
-      const div = pre.createDiv();
-
-      if (line.startsWith("+") && !line.startsWith("+++")) {
-        div.addClass("gemihub-diff-add");
-      } else if (line.startsWith("-") && !line.startsWith("---")) {
-        div.addClass("gemihub-diff-remove");
-      } else if (line.startsWith("@@")) {
-        div.addClass("gemihub-diff-hunk");
-      } else if (line.startsWith("+++") || line.startsWith("---")) {
-        div.addClass("gemihub-diff-header");
-      }
-
-      // Separate prefix from content (prefix is non-selectable)
-      if ((line.startsWith("+") || line.startsWith("-")) && !line.startsWith("+++") && !line.startsWith("---")) {
-        const prefix = div.createSpan({ cls: "gemihub-diff-prefix" });
-        prefix.setText(line[0]);
-        div.appendText(line.slice(1));
-      } else {
-        div.setText(line);
-      }
+  private addResizeHandles(modalEl: HTMLElement) {
+    const directions = ["n", "e", "s", "w", "ne", "nw", "se", "sw"];
+    for (const dir of directions) {
+      const handle = document.createElement("div");
+      handle.className = `gemihub-resize-handle gemihub-resize-${dir}`;
+      modalEl.appendChild(handle);
+      this.setupResize(handle, modalEl, dir);
     }
+  }
+
+  private setupDrag(header: HTMLElement, modalEl: HTMLElement) {
+    const onMouseDown = (e: MouseEvent) => {
+      if ((e.target as HTMLElement).tagName === "BUTTON") return;
+
+      this.isDragging = true;
+      this.dragStartX = e.clientX;
+      this.dragStartY = e.clientY;
+
+      const rect = modalEl.getBoundingClientRect();
+      this.modalStartX = rect.left;
+      this.modalStartY = rect.top;
+
+      modalEl.setCssProps({
+        position: "fixed",
+        margin: "0",
+        transform: "none",
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+      });
+
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      e.preventDefault();
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!this.isDragging) return;
+
+      const deltaX = e.clientX - this.dragStartX;
+      const deltaY = e.clientY - this.dragStartY;
+
+      modalEl.setCssProps({
+        left: `${this.modalStartX + deltaX}px`,
+        top: `${this.modalStartY + deltaY}px`,
+      });
+    };
+
+    const onMouseUp = () => {
+      this.isDragging = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    header.addEventListener("mousedown", onMouseDown);
+  }
+
+  private setupResize(handle: HTMLElement, modalEl: HTMLElement, direction: string) {
+    const onMouseDown = (e: MouseEvent) => {
+      this.isResizing = true;
+      this.resizeDirection = direction;
+      this.dragStartX = e.clientX;
+      this.dragStartY = e.clientY;
+
+      const rect = modalEl.getBoundingClientRect();
+      this.resizeStartWidth = rect.width;
+      this.resizeStartHeight = rect.height;
+      this.modalStartX = rect.left;
+      this.modalStartY = rect.top;
+
+      modalEl.setCssProps({
+        position: "fixed",
+        margin: "0",
+        transform: "none",
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+        width: `${rect.width}px`,
+        height: `${rect.height}px`,
+      });
+
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!this.isResizing) return;
+
+      const deltaX = e.clientX - this.dragStartX;
+      const deltaY = e.clientY - this.dragStartY;
+      const dir = this.resizeDirection;
+
+      let newWidth = this.resizeStartWidth;
+      let newHeight = this.resizeStartHeight;
+      let newLeft = this.modalStartX;
+      let newTop = this.modalStartY;
+
+      if (dir.includes("e")) {
+        newWidth = Math.max(400, this.resizeStartWidth + deltaX);
+      }
+      if (dir.includes("w")) {
+        newWidth = Math.max(400, this.resizeStartWidth - deltaX);
+        newLeft = this.modalStartX + (this.resizeStartWidth - newWidth);
+      }
+      if (dir.includes("s")) {
+        newHeight = Math.max(300, this.resizeStartHeight + deltaY);
+      }
+      if (dir.includes("n")) {
+        newHeight = Math.max(300, this.resizeStartHeight - deltaY);
+        newTop = this.modalStartY + (this.resizeStartHeight - newHeight);
+      }
+
+      modalEl.setCssProps({
+        width: `${newWidth}px`,
+        height: `${newHeight}px`,
+        left: `${newLeft}px`,
+        top: `${newTop}px`,
+      });
+    };
+
+    const onMouseUp = () => {
+      this.isResizing = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    handle.addEventListener("mousedown", onMouseDown);
   }
 
   private updateTitle(): void {
@@ -345,6 +460,9 @@ export class DriveSyncDiffModal extends Modal {
     if (this.resolve) {
       this.resolve({ confirmed: false });
       this.resolve = null;
+    }
+    for (const state of Object.values(this.diffStates)) {
+      state.diffRenderer?.destroy();
     }
     this.diffStates = {};
     this.ignoredIds.clear();

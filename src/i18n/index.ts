@@ -145,6 +145,10 @@ const en: Record<string, string> = {
   "driveSync.startFullPulling": "Full pull from drive...",
   "driveSync.startFullPushing": "Full push to drive...",
 
+  // Diff viewer
+  "diff.unifiedView": "Unified",
+  "diff.splitView": "Split",
+
   // editHistoryModal
   "editHistoryModal.title": "Edit history: {{file}}",
   "editHistoryModal.unsavedChanges": "Unsaved changes",
@@ -327,6 +331,10 @@ const ja: Record<string, string> = {
   "driveSync.startPulling": "Driveからプル中...",
   "driveSync.startFullPulling": "Driveからフルプル中...",
   "driveSync.startFullPushing": "Driveにフルプッシュ中...",
+
+  // Diff viewer
+  "diff.unifiedView": "統合",
+  "diff.splitView": "分割",
 
   // editHistoryModal
   "editHistoryModal.title": "編集履歴: {{file}}",
