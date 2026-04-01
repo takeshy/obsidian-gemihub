@@ -446,6 +446,8 @@ export class DriveSyncManager {
     // Track disappeared paths (in pathToId but file no longer exists at that path)
     // Map: checksum → array of { fileId, oldPath } (multiple files can share the same checksum)
     const disappearedByChecksum = new Map<string, Array<{ fileId: string; oldPath: string }>>();
+    // Files that disappeared but have no checksum for rename matching → directly deleted
+    const disappearedNoChecksum = new Set<string>();
 
     // Build case-insensitive lookup for currentChecksums and pathToId (handles NTFS/macOS)
     const currentChecksumsLower = new Map<string, string>();
@@ -464,6 +466,9 @@ export class DriveSyncManager {
         const arr = disappearedByChecksum.get(trackedChecksum) ?? [];
         arr.push({ fileId, oldPath: path });
         disappearedByChecksum.set(trackedChecksum, arr);
+      } else if (!currentChecksum && !trackedChecksum) {
+        // File disappeared and tracked checksum is empty/falsy — can't do rename matching
+        disappearedNoChecksum.add(fileId);
       } else if (currentChecksum && trackedChecksum && currentChecksum !== trackedChecksum) {
         modifiedIds.add(fileId);
       }
@@ -488,7 +493,7 @@ export class DriveSyncManager {
     }
 
     // Remaining disappeared entries are truly deleted files (not renamed)
-    const deletedIds = new Set<string>();
+    const deletedIds = new Set<string>(disappearedNoChecksum);
     for (const arr of disappearedByChecksum.values()) {
       for (const { fileId } of arr) {
         deletedIds.add(fileId);
@@ -503,7 +508,8 @@ export class DriveSyncManager {
    * These should be re-downloaded on pull.
    * Files that were previously on disk (have localMtime) but now missing
    * are treated as intentional local deletions and skipped.
-   * Files that were never downloaded (no localMtime) are always included.
+   * Files that were never downloaded (no localMtime) are usually included.
+   * Skip them only when a related new local path suggests a move/rename with content change.
    */
   private findMissingLocalFiles(
     localMeta: LocalDriveSyncMeta,
@@ -511,7 +517,8 @@ export class DriveSyncManager {
     checksums: Map<string, string>,
     diff: SyncDiff,
     renames: Map<string, string> = new Map(),
-    deletedIds: Set<string> = new Set()
+    deletedIds: Set<string> = new Set(),
+    newPaths: Set<string> = new Set()
   ): string[] {
     if (!remoteMeta) return [];
     const idToPath = buildIdToPathMap(localMeta);
@@ -530,6 +537,23 @@ export class DriveSyncManager {
 
     const hasChecksumCI = (p: string) => checksums.has(p) || checksumsLower.has(p.toLowerCase());
     const hasRenameCI = (p: string) => renames.has(p) || renamesLower.has(p.toLowerCase());
+    // Check whether a newPath looks like a moved/encrypted version of trackedPath.
+    // Uses basename after stripping .encrypted so that both directory moves
+    // (a/foo.md → b/foo.md) and encryption renames (foo.md → foo.md.encrypted)
+    // are recognised. This is a heuristic — same-basename coincidence across
+    // unrelated files is possible but rare enough not to warrant stricter checks.
+    const baseName = (p: string) => {
+      const stripped = p.endsWith(".encrypted") ? p.slice(0, -".encrypted".length) : p;
+      const slash = stripped.lastIndexOf("/");
+      return (slash >= 0 ? stripped.slice(slash + 1) : stripped).toLowerCase();
+    };
+    const hasRelatedNewPath = (trackedPath: string) => {
+      const tracked = baseName(trackedPath);
+      for (const np of newPaths) {
+        if (baseName(np) === tracked) return true;
+      }
+      return false;
+    };
 
     const missing: string[] = [];
     for (const fileId of Object.keys(remoteMeta.files)) {
@@ -542,10 +566,14 @@ export class DriveSyncManager {
       if (deletedIds.has(fileId)) {
         const entry = localMeta.files[fileId];
         if (entry.localMtime !== undefined || entry.name === undefined) continue;
-        // Skip if file was encrypted/decrypted (renamed with content change).
-        // Checksum-based rename detection fails here because encryption changes content.
         const trackedPath = idToPath[fileId];
         if (trackedPath) {
+          // Skip if a related new path (basename match) suggests a move/rename
+          // with content change. Checksum-based rename detection fails when
+          // the content also changes (e.g., Obsidian link updates, encryption).
+          if (hasRelatedNewPath(trackedPath)) continue;
+          // Fallback: the .encrypted version may already be tracked (not in
+          // newPaths) but still present on disk — catch that case separately.
           if (hasChecksumCI(trackedPath + ".encrypted")) continue;
           if (trackedPath.endsWith(".encrypted") && hasChecksumCI(trackedPath.slice(0, -".encrypted".length))) continue;
         }
@@ -691,7 +719,7 @@ export class DriveSyncManager {
       const diff = computeSyncDiff(localMeta, remoteMeta, modifiedIds);
 
       // Detect files tracked in meta but physically missing from disk (exclude intentional deletions)
-      const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds);
+      const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds, newPaths);
       diff.toPull.push(...missingLocal);
 
       // Resolve id → path for exclusion filtering
@@ -848,7 +876,7 @@ export class DriveSyncManager {
 
     // Detect files tracked in meta but physically missing from disk (for pull, exclude intentional deletions)
     if (direction === "pull") {
-      const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds);
+      const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds, newPaths);
       diff.toPull.push(...missingLocal);
     }
 
@@ -1245,13 +1273,13 @@ export class DriveSyncManager {
       // 2. Compute vault checksums and find modified files
       const vaultFiles = this.getAllVaultFiles();
       const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
-      const { modifiedIds, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
+      const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
 
       // 3. Compute diff
       const diff = computeSyncDiff(localMeta, remoteMeta, modifiedIds);
 
       // 3.1. Re-download files tracked in meta but physically missing from disk (exclude intentional deletions)
-      const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds);
+      const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds, newPaths);
       diff.toPull.push(...missingLocal);
 
       // 3.5. Guard: detect untracked local files that would be overwritten,
