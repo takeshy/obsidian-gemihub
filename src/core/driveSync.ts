@@ -1383,6 +1383,28 @@ export class DriveSyncManager {
   }
 
   /**
+   * Trash a vault file by path. Falls back to adapter.trashLocal when
+   * Obsidian's index doesn't surface the file (case mismatch on
+   * case-sensitive FS, external add not yet picked up). Without the
+   * fallback, trash would silently no-op while the caller wipes the
+   * matching metadata — the file then looks new on the next sync and
+   * gets re-pushed, undoing the remote delete.
+   * Returns true if a file was actually trashed.
+   */
+  private async trashByPath(path: string): Promise<boolean> {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile) {
+      await this.app.fileManager.trashFile(file);
+      return true;
+    }
+    if (await this.app.vault.adapter.exists(path)) {
+      await this.app.vault.adapter.trashLocal(path);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Apply pull diff: delete local-only, download remote changes.
    * Returns counts of files cleaned up by the catch-all step (not in diff).
    */
@@ -1401,10 +1423,7 @@ export class DriveSyncManager {
     for (const fileId of diff.localOnly) {
       const path = idToPath[fileId];
       if (path) {
-        const file = this.app.vault.getAbstractFileByPath(path);
-        if (file instanceof TFile) {
-          await this.app.fileManager.trashFile(file);
-        }
+        await this.trashByPath(path);
         delete localMeta.pathToId[path];
       }
       delete localMeta.files[fileId];
@@ -1419,10 +1438,7 @@ export class DriveSyncManager {
       const remotePath = remoteMeta.files[fileId]?.name;
       if (oldPath && remotePath && oldPath !== remotePath
           && oldPath.toLowerCase() !== remotePath.toLowerCase()) {
-        const oldFile = this.app.vault.getAbstractFileByPath(oldPath);
-        if (oldFile instanceof TFile) {
-          await this.app.fileManager.trashFile(oldFile);
-        }
+        await this.trashByPath(oldPath);
         delete localMeta.pathToId[oldPath];
       }
     }
@@ -1444,9 +1460,7 @@ export class DriveSyncManager {
     const additionalDownloads: string[] = [];
     for (const item of catchAllPlan.deletes) {
       if (ignoredIds?.has(item.fileId)) continue;
-      const file = this.app.vault.getAbstractFileByPath(item.path);
-      if (file instanceof TFile) {
-        await this.app.fileManager.trashFile(file);
+      if (await this.trashByPath(item.path)) {
         cleanupDeleteCount++;
       }
       delete localMeta.pathToId[item.path];
@@ -1455,10 +1469,7 @@ export class DriveSyncManager {
 
     for (const item of catchAllPlan.renames) {
       if (ignoredIds?.has(item.fileId)) continue;
-      const oldFile = this.app.vault.getAbstractFileByPath(item.oldPath);
-      if (oldFile instanceof TFile) {
-        await this.app.fileManager.trashFile(oldFile);
-      }
+      await this.trashByPath(item.oldPath);
       delete localMeta.pathToId[item.oldPath];
       if (item.backupExistingTarget) {
         const existingAtNewPath = this.app.vault.getAbstractFileByPath(item.newPath);
