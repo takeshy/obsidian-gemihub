@@ -1074,7 +1074,11 @@ export class DriveSyncManager {
       // - localOnly: files in localMeta but not remoteMeta (deleted locally before ever syncing remote)
       // - deletedIds: files in both metas but physically deleted from disk
       // Verify with adapter.exists to avoid trashing files that exist on disk
-      // but are temporarily missing from Obsidian's index
+      // but are temporarily missing from Obsidian's index.
+      // Skip excluded paths: an excluded file shows up here because
+      // getAllVaultFiles filters it out, so findLocallyModifiedFiles treats
+      // it as disappeared — but it's managed by another tool (e.g. GemiHub
+      // owns `web/`) and must not be trashed on Drive.
       const candidateTrash = [
         ...diff.localOnly.filter(id => {
           if (renamedFileIds.has(id)) return false;
@@ -1086,7 +1090,9 @@ export class DriveSyncManager {
       const filesToTrash: string[] = [];
       for (const id of candidateTrash) {
         const path = idToPath[id];
-        if (path && !(await this.app.vault.adapter.exists(path))) {
+        if (!path) continue;
+        if (this.isExcludedPath(path)) continue;
+        if (!(await this.app.vault.adapter.exists(path))) {
           filesToTrash.push(id);
         }
       }
@@ -1783,8 +1789,14 @@ export class DriveSyncManager {
       }
 
       // Move remote-only files to trash so full push makes Drive match the local vault.
+      // Preserve files at excluded paths — they're owned by another tool
+      // (e.g. GemiHub's `web/`) that syncs to the same Drive folder.
       const trackedIds = new Set(Object.keys(remoteMeta.files));
-      const filesToTrash = existingRemoteFiles.filter((file) => !trackedIds.has(file.id));
+      const filesToTrash = existingRemoteFiles.filter((file) => {
+        if (trackedIds.has(file.id)) return false;
+        if (this.isExcludedPath(file.name)) return false;
+        return true;
+      });
       if (filesToTrash.length > 0) {
         const trashFolderId = await drive.ensureSubFolder(accessToken, rootFolderId, "trash");
         for (const file of filesToTrash) {
