@@ -339,6 +339,35 @@ export class DriveSyncManager {
     return drive.readFile(tokens.accessToken, fileId);
   }
 
+  /**
+   * Restore a locally-deleted file by downloading the Drive copy back into
+   * the vault. Used by the push preview to recover from an accidental
+   * local delete before the push removes the remote copy too.
+   */
+  async restoreDeletedLocally(fileId: string): Promise<string> {
+    const tokens = await this.getTokens();
+    const { accessToken, rootFolderId } = tokens;
+    const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
+    const fileMeta = remoteMeta?.files[fileId];
+    if (!remoteMeta || !fileMeta) {
+      throw new Error("File not found on Drive");
+    }
+    const localMeta = await readLocalSyncMeta(this.app);
+    await this.downloadFile(accessToken, rootFolderId, fileId, remoteMeta, localMeta);
+    const path = localMeta.files[fileId]?.name ?? fileMeta.name;
+    const tfile = path ? this.app.vault.getAbstractFileByPath(path) : null;
+    if (tfile instanceof TFile) {
+      const entry = localMeta.files[fileId];
+      if (entry) {
+        entry.localMtime = tfile.stat.mtime;
+        entry.localSize = tfile.stat.size;
+      }
+    }
+    await writeLocalSyncMeta(this.app, localMeta);
+    await this.refreshSyncCounts();
+    return path;
+  }
+
   /** Load remote edit history entries for a file from Google Drive. */
   async loadRemoteEditHistory(filePath: string): Promise<DriveEditHistoryEntry[]> {
     const tokens = await this.getTokens();

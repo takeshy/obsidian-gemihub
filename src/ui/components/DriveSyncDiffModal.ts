@@ -1,7 +1,7 @@
 // Sync diff modal for Google Drive sync.
 // Shows file list with expandable diff view, similar to GemiHub's SyncDiffDialog.
 
-import { Modal, App, Setting, setIcon, TFile } from "obsidian";
+import { Modal, App, Notice, Setting, setIcon, TFile } from "obsidian";
 import type { SyncFileListItem, DriveSyncManager } from "src/core/driveSync";
 import { isBinaryExtension } from "src/core/driveSyncUtils";
 import { t } from "src/i18n";
@@ -160,9 +160,22 @@ export class DriveSyncDiffModal extends Modal {
       tagEl.setText(t("driveSync.conflictNeedResolve"));
     }
 
-    // Open button (only when file exists locally)
+    // Action button: "Restore" for push-side deletions (pulls the Drive copy
+    // back into the vault to recover from an accidental local delete);
+    // otherwise "Open" when the file exists locally.
+    const isPushDelete = this.direction === "push" && file.type === "deleted";
     const hasLocal = !(file.type === "new" && this.direction === "pull");
-    if (hasLocal) {
+    if (isPushDelete) {
+      const restoreBtn = headerEl.createEl("button", { cls: "gemihub-sync-diff-toggle" });
+      const restoreIconEl = restoreBtn.createSpan();
+      setIcon(restoreIconEl, "rotate-ccw");
+      const restoreLabel = restoreBtn.createSpan();
+      restoreLabel.setText(t("driveSync.restore"));
+      restoreBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void this.handleRestore(file, itemEl, restoreBtn);
+      });
+    } else if (hasLocal) {
       const openBtn = headerEl.createEl("button", { cls: "gemihub-sync-diff-toggle" });
       const openIconEl = openBtn.createSpan();
       setIcon(openIconEl, "external-link");
@@ -221,6 +234,31 @@ export class DriveSyncDiffModal extends Modal {
     } else if (isBinaryExtension(file.name) && file.type !== "editDeleted") {
       const noDiffEl = headerEl.createSpan({ cls: "gemihub-sync-diff-no-diff" });
       noDiffEl.setText(t("driveSync.binary"));
+    }
+  }
+
+  private async handleRestore(
+    file: SyncFileListItem,
+    itemEl: HTMLElement,
+    restoreBtn: HTMLButtonElement,
+  ): Promise<void> {
+    restoreBtn.disabled = true;
+    try {
+      await this.syncManager.restoreDeletedLocally(file.id);
+      this.files = this.files.filter((f) => f.id !== file.id);
+      this.diffStates[file.id]?.diffRenderer?.destroy();
+      delete this.diffStates[file.id];
+      itemEl.remove();
+      this.updateTitle();
+      if (this.files.length === 0) {
+        const resolve = this.resolve;
+        this.resolve = null;
+        this.close();
+        resolve?.({ confirmed: false });
+      }
+    } catch (err) {
+      restoreBtn.disabled = false;
+      new Notice(t("driveSync.restoreFailed", { name: file.name, error: err instanceof Error ? err.message : String(err) }));
     }
   }
 
