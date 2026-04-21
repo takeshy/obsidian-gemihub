@@ -1383,18 +1383,35 @@ export class DriveSyncManager {
   }
 
   /**
-   * Trash a vault file by path. Falls back to adapter.trashLocal when
-   * Obsidian's index doesn't surface the file (case mismatch on
-   * case-sensitive FS, external add not yet picked up). Without the
-   * fallback, trash would silently no-op while the caller wipes the
-   * matching metadata — the file then looks new on the next sync and
-   * gets re-pushed, undoing the remote delete.
-   * Returns true if a file was actually trashed.
+   * Trash a vault file by path. Two failure modes the plain
+   * fileManager.trashFile() call doesn't cover:
+   * - Obsidian's index doesn't surface the file (case mismatch on
+   *   case-sensitive FS, external add not yet picked up) — trashFile
+   *   silently no-ops because its TFile argument never existed.
+   * - The user's "Deleted files" setting is "Permanently delete".
+   *   fileManager.trashFile is documented to only handle .trash/ and
+   *   OS-trash options; with "Permanent" it silently no-ops for certain
+   *   file types (observed on .txt/.pdf but not .md).
+   * In both cases the caller wipes the matching metadata while the file
+   * stays on disk — it then looks new on the next sync and gets
+   * re-pushed, undoing the remote delete. So after trashFile we verify
+   * the file is gone and force-delete if not.
+   * Returns true if a file was actually removed.
    */
   private async trashByPath(path: string): Promise<boolean> {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (file instanceof TFile) {
-      await this.app.fileManager.trashFile(file);
+      try {
+        await this.app.fileManager.trashFile(file);
+      } catch (err) {
+        console.debug("[DriveSync] trashFile failed, will force-delete:", err);
+      }
+      if (!(await this.app.vault.adapter.exists(path))) return true;
+      // trashFile returned but the file is still on disk: it silently
+      // no-ops for the "Permanent delete" setting on some file types.
+      // Force-remove via the adapter so the sync state stays consistent
+      // with the remote deletion.
+      await this.app.vault.adapter.remove(path);
       return true;
     }
     if (await this.app.vault.adapter.exists(path)) {
@@ -1961,8 +1978,8 @@ export class DriveSyncManager {
           const content = await this.app.vault.read(file);
           await saveConflictBackup(accessToken, rootFolderId, vaultPath, content);
         }
-        await this.app.fileManager.trashFile(file);
       }
+      await this.trashByPath(vaultPath);
       delete localMeta.pathToId[vaultPath];
       delete localMeta.files[fileId];
     }
