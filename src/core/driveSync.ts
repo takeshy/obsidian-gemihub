@@ -136,6 +136,13 @@ function isValidVaultPath(path: string): boolean {
 
 const CONCURRENCY = 5;
 
+/**
+ * Lightweight file record from the adapter-level vault walker.
+ * Shaped like TFile ({ path, stat: { mtime, size } }) so call sites that only
+ * read those fields keep working unchanged.
+ */
+type VaultFileEntry = { path: string; stat: { mtime: number; size: number } };
+
 export class DriveSyncManager {
   private app: App;
   private plugin: GemiHubPlugin;
@@ -241,7 +248,7 @@ export class DriveSyncManager {
       const { accessToken } = this.sessionTokens;
       const localMeta = await readLocalSyncMeta(this.app);
       if (Object.keys(localMeta.files).length > 0) {
-        const vaultFiles = this.getAllVaultFiles();
+        const vaultFiles = await this.getAllVaultFiles();
         const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
         const { modifiedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
         const idToPath = buildIdToPathMap(localMeta);
@@ -250,13 +257,12 @@ export class DriveSyncManager {
           const path = idToPath[fileId];
           if (!path) continue;
           try {
-            const file = this.app.vault.getAbstractFileByPath(path);
-            if (file instanceof TFile) {
+            if (await this.app.vault.adapter.exists(path)) {
               if (isBinaryExtension(path)) {
-                const buf = await this.app.vault.readBinary(file);
+                const buf = await this.app.vault.adapter.readBinary(path);
                 await saveConflictBackup(accessToken, rootFolderId, path, buf);
               } else {
-                const content = await this.app.vault.read(file);
+                const content = await this.app.vault.adapter.read(path);
                 await saveConflictBackup(accessToken, rootFolderId, path, content);
               }
               backupCount++;
@@ -388,16 +394,50 @@ export class DriveSyncManager {
 
   /**
    * Get all syncable files in the Vault.
+   *
+   * Walks the filesystem via DataAdapter instead of vault.getFiles(), because
+   * Obsidian's index only surfaces known extensions (md, canvas, pdf, images,
+   * audio, video) — files like .html/.css/.js are invisible to getFiles() even
+   * with "Detect all file extensions" enabled, so they would silently skip push.
    */
-  private getAllVaultFiles(): TFile[] {
+  private async getAllVaultFiles(): Promise<VaultFileEntry[]> {
+    const adapter = this.app.vault.adapter;
     const excludePatterns = this.settings.excludePatterns;
     const syncMetaPath = getLocalMetaPath();
     const configDir = this.app.vault.configDir;
-    return this.app.vault.getFiles().filter((file) => {
-      // Exclude the local sync meta file itself
-      if (file.path === syncMetaPath) return false;
-      return !isSyncExcludedPath(file.path, excludePatterns, configDir);
-    });
+    const out: VaultFileEntry[] = [];
+
+    const walk = async (dir: string): Promise<void> => {
+      let listed: { files: string[]; folders: string[] };
+      try {
+        listed = await adapter.list(dir);
+      } catch (err) {
+        console.warn(`[DriveSync] list failed for ${dir || "/"}:`, err);
+        return;
+      }
+      const subwalks: Promise<void>[] = [];
+      for (const folderPath of listed.folders) {
+        // Append "/" so prefix-based exclusions (e.g. "history/", configDir)
+        // match against bare folder paths returned by adapter.list.
+        if (isSyncExcludedPath(folderPath + "/", excludePatterns, configDir)) continue;
+        subwalks.push(walk(folderPath));
+      }
+      const statWork = listed.files.map(async (filePath) => {
+        if (filePath === syncMetaPath) return;
+        if (isSyncExcludedPath(filePath, excludePatterns, configDir)) return;
+        try {
+          const stat = await adapter.stat(filePath);
+          if (!stat || stat.type !== "file") return;
+          out.push({ path: filePath, stat: { mtime: stat.mtime, size: stat.size } });
+        } catch (err) {
+          console.warn(`[DriveSync] stat failed for ${filePath}:`, err);
+        }
+      });
+      await Promise.all([...subwalks, ...statWork]);
+    };
+
+    await walk("/");
+    return out;
   }
 
   /** Check if a vault path is excluded from sync. */
@@ -411,7 +451,7 @@ export class DriveSyncManager {
    * Returns checksums (path → md5) and vaultStats (path → {mtime, size}).
    */
   private async computeVaultChecksums(
-    files: TFile[],
+    files: VaultFileEntry[],
     localMeta?: LocalDriveSyncMeta
   ): Promise<{ checksums: Map<string, string>; vaultStats: Map<string, { mtime: number; size: number }> }> {
     const checksums = new Map<string, string>();
@@ -447,10 +487,10 @@ export class DriveSyncManager {
           }
 
           if (isBinaryExtension(file.path)) {
-            const content = await this.app.vault.readBinary(file);
+            const content = await this.app.vault.adapter.readBinary(file.path);
             checksums.set(file.path, md5Hash(new Uint8Array(content)));
           } else {
-            const content = await this.app.vault.read(file);
+            const content = await this.app.vault.adapter.read(file.path);
             checksums.set(file.path, md5HashString(content));
           }
         } catch (err) {
@@ -741,7 +781,7 @@ export class DriveSyncManager {
       const localMeta = await readLocalSyncMeta(this.app);
       const remoteMeta = await this.readReconciledRemoteMeta(tokens.accessToken, tokens.rootFolderId);
 
-      const vaultFiles = this.getAllVaultFiles();
+      const vaultFiles = await this.getAllVaultFiles();
       const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
       const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
 
@@ -821,7 +861,7 @@ export class DriveSyncManager {
 
     try {
       const localMeta = await readLocalSyncMeta(this.app);
-      const vaultFiles = this.getAllVaultFiles();
+      const vaultFiles = await this.getAllVaultFiles();
       const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
       const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
 
@@ -897,7 +937,7 @@ export class DriveSyncManager {
     const localMeta = await readLocalSyncMeta(this.app);
     const remoteMeta = await this.readReconciledRemoteMeta(tokens.accessToken, tokens.rootFolderId);
 
-    const vaultFiles = this.getAllVaultFiles();
+    const vaultFiles = await this.getAllVaultFiles();
     const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
     const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
 
@@ -1029,7 +1069,7 @@ export class DriveSyncManager {
       let remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
 
       // 2. Compute vault checksums and find modified files
-      const vaultFiles = this.getAllVaultFiles();
+      const vaultFiles = await this.getAllVaultFiles();
       const { checksums, vaultStats } = await this.computeVaultChecksums(vaultFiles, localMeta);
       const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
 
@@ -1221,8 +1261,8 @@ export class DriveSyncManager {
     localMeta: LocalDriveSyncMeta,
     checksums: Map<string, string>
   ): Promise<{ oldContent: string | null; newContent: string | null }> {
-    const file = this.app.vault.getAbstractFileByPath(vaultPath);
-    if (!(file instanceof TFile)) return { oldContent: null, newContent: null };
+    // Read via adapter so Obsidian-unindexed extensions (html, css, js, etc.) upload.
+    if (!(await this.app.vault.adapter.exists(vaultPath))) return { oldContent: null, newContent: null };
 
     const mimeType = getMimeType(vaultPath);
     const isBinary = isBinaryExtension(vaultPath);
@@ -1245,20 +1285,20 @@ export class DriveSyncManager {
 
       // Update existing file
       if (isBinary) {
-        const content = await this.app.vault.readBinary(file);
+        const content = await this.app.vault.adapter.readBinary(vaultPath);
         driveFile = await drive.updateFileBinary(accessToken, existingDriveId, content, mimeType);
       } else {
-        const content = await this.app.vault.read(file);
+        const content = await this.app.vault.adapter.read(vaultPath);
         newContent = content;
         driveFile = await drive.updateFile(accessToken, existingDriveId, content, mimeType);
       }
     } else {
       // Create new file in root folder with vaultPath as name
       if (isBinary) {
-        const content = await this.app.vault.readBinary(file);
+        const content = await this.app.vault.adapter.readBinary(vaultPath);
         driveFile = await drive.createFileBinary(accessToken, vaultPath, content, rootFolderId, mimeType);
       } else {
-        const content = await this.app.vault.read(file);
+        const content = await this.app.vault.adapter.read(vaultPath);
         newContent = content;
         driveFile = await drive.createFile(accessToken, vaultPath, content, rootFolderId, mimeType);
       }
@@ -1306,7 +1346,7 @@ export class DriveSyncManager {
       }
 
       // 2. Compute vault checksums and find modified files
-      const vaultFiles = this.getAllVaultFiles();
+      const vaultFiles = await this.getAllVaultFiles();
       const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
       const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
 
@@ -1524,13 +1564,12 @@ export class DriveSyncManager {
       await this.trashByPath(item.oldPath);
       delete localMeta.pathToId[item.oldPath];
       if (item.backupExistingTarget) {
-        const existingAtNewPath = this.app.vault.getAbstractFileByPath(item.newPath);
-        if (existingAtNewPath instanceof TFile) {
+        if (await this.app.vault.adapter.exists(item.newPath)) {
           if (isBinaryExtension(item.newPath)) {
-            const content = await this.app.vault.readBinary(existingAtNewPath);
+            const content = await this.app.vault.adapter.readBinary(item.newPath);
             await saveConflictBackup(accessToken, rootFolderId, item.newPath, content);
           } else {
-            const content = await this.app.vault.read(existingAtNewPath);
+            const content = await this.app.vault.adapter.read(item.newPath);
             await saveConflictBackup(accessToken, rootFolderId, item.newPath, content);
           }
         }
@@ -1549,7 +1588,7 @@ export class DriveSyncManager {
 
     // 3. Update local meta
     const vaultStats = new Map<string, { mtime: number; size: number }>();
-    for (const f of this.getAllVaultFiles()) {
+    for (const f of await this.getAllVaultFiles()) {
       vaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
     }
     const updatedLocalMeta = toLocalSyncMeta(remoteMeta, localMeta, vaultStats);
@@ -1716,7 +1755,7 @@ export class DriveSyncManager {
       // On NTFS/macOS, remote path "articles/x.md" is written to "Articles/x.md"
       // but pathToId may store the remote-case path. Build a lookup to reconcile.
       const vaultPathsByLower = new Map<string, string>();
-      for (const f of this.getAllVaultFiles()) {
+      for (const f of await this.getAllVaultFiles()) {
         vaultPathsByLower.set(f.path.toLowerCase(), f.path);
       }
       const reconciledPathToId: Record<string, string> = {};
@@ -1727,16 +1766,16 @@ export class DriveSyncManager {
       newLocalMeta.pathToId = reconciledPathToId;
 
       // Delete vault files not in remote
-      const vaultFiles = this.getAllVaultFiles();
+      const vaultFiles = await this.getAllVaultFiles();
       for (const file of vaultFiles) {
         if (!newLocalMeta.pathToId[file.path]) {
-          await this.app.fileManager.trashFile(file);
+          await this.trashByPath(file.path);
         }
       }
 
       // Save local meta (collect fresh vault stats after download)
       const freshVaultStats = new Map<string, { mtime: number; size: number }>();
-      for (const f of this.getAllVaultFiles()) {
+      for (const f of await this.getAllVaultFiles()) {
         freshVaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
       }
       // Only include files that were actually downloaded in localMeta.
@@ -1801,7 +1840,7 @@ export class DriveSyncManager {
       const existingRemoteFiles = await drive.listUserFiles(accessToken, rootFolderId);
 
       // Get all vault files and compute checksums
-      const vaultFiles = this.getAllVaultFiles();
+      const vaultFiles = await this.getAllVaultFiles();
       const { checksums, vaultStats: fullPushVaultStats } = await this.computeVaultChecksums(vaultFiles, oldLocalMeta);
 
       // Upload all files
@@ -1925,8 +1964,7 @@ export class DriveSyncManager {
 
     if (choice === "local") {
       // Local wins: upload local content to Drive, backup remote
-      const file = this.app.vault.getAbstractFileByPath(vaultPath);
-      if (file instanceof TFile) {
+      if (await this.app.vault.adapter.exists(vaultPath)) {
         // Backup remote content (binary or text)
         if (isBinary) {
           const remoteContent = await drive.readFileRaw(accessToken, fileId);
@@ -1940,10 +1978,10 @@ export class DriveSyncManager {
         const mimeType = getMimeType(vaultPath);
         let driveFile: drive.DriveFile;
         if (isBinary) {
-          const content = await this.app.vault.readBinary(file);
+          const content = await this.app.vault.adapter.readBinary(vaultPath);
           driveFile = await drive.updateFileBinary(accessToken, fileId, content, mimeType);
         } else {
-          const content = await this.app.vault.read(file);
+          const content = await this.app.vault.adapter.read(vaultPath);
           driveFile = await drive.updateFile(accessToken, fileId, content, mimeType);
         }
 
@@ -1951,13 +1989,12 @@ export class DriveSyncManager {
       }
     } else {
       // Remote wins: download remote content, backup local
-      const file = this.app.vault.getAbstractFileByPath(vaultPath);
-      if (file instanceof TFile) {
+      if (await this.app.vault.adapter.exists(vaultPath)) {
         if (isBinary) {
-          const localContent = await this.app.vault.readBinary(file);
+          const localContent = await this.app.vault.adapter.readBinary(vaultPath);
           await saveConflictBackup(accessToken, rootFolderId, vaultPath, localContent);
         } else {
-          const localContent = await this.app.vault.read(file);
+          const localContent = await this.app.vault.adapter.read(vaultPath);
           await saveConflictBackup(accessToken, rootFolderId, vaultPath, localContent);
         }
       }
@@ -1969,7 +2006,7 @@ export class DriveSyncManager {
     // Update remote and local meta
     await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
     const vaultStats = new Map<string, { mtime: number; size: number }>();
-    for (const f of this.getAllVaultFiles()) {
+    for (const f of await this.getAllVaultFiles()) {
       vaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
     }
     const updatedLocalMeta = toLocalSyncMeta(remoteMeta, localMeta, vaultStats);
@@ -1987,18 +2024,17 @@ export class DriveSyncManager {
   ): Promise<void> {
     if (choice === "local") {
       // Keep local file: re-upload to Drive
-      const file = this.app.vault.getAbstractFileByPath(vaultPath);
-      if (file instanceof TFile) {
+      if (await this.app.vault.adapter.exists(vaultPath)) {
         const mimeType = getMimeType(vaultPath);
         const isBinary = isBinaryExtension(vaultPath);
 
         // Drive uses flat structure: file name = vault path
         let driveFile: drive.DriveFile;
         if (isBinary) {
-          const content = await this.app.vault.readBinary(file);
+          const content = await this.app.vault.adapter.readBinary(vaultPath);
           driveFile = await drive.createFileBinary(accessToken, vaultPath, content, rootFolderId, mimeType);
         } else {
-          const content = await this.app.vault.read(file);
+          const content = await this.app.vault.adapter.read(vaultPath);
           driveFile = await drive.createFile(accessToken, vaultPath, content, rootFolderId, mimeType);
         }
 
@@ -2009,14 +2045,13 @@ export class DriveSyncManager {
       }
     } else {
       // Accept deletion: remove local file
-      const file = this.app.vault.getAbstractFileByPath(vaultPath);
-      if (file instanceof TFile) {
+      if (await this.app.vault.adapter.exists(vaultPath)) {
         // Backup before deleting (binary or text)
         if (isBinaryExtension(vaultPath)) {
-          const content = await this.app.vault.readBinary(file);
+          const content = await this.app.vault.adapter.readBinary(vaultPath);
           await saveConflictBackup(accessToken, rootFolderId, vaultPath, content);
         } else {
-          const content = await this.app.vault.read(file);
+          const content = await this.app.vault.adapter.read(vaultPath);
           await saveConflictBackup(accessToken, rootFolderId, vaultPath, content);
         }
       }
@@ -2030,7 +2065,7 @@ export class DriveSyncManager {
 
     await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
     const vaultStats = new Map<string, { mtime: number; size: number }>();
-    for (const f of this.getAllVaultFiles()) {
+    for (const f of await this.getAllVaultFiles()) {
       vaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
     }
     const updatedLocalMeta = toLocalSyncMeta(remoteMeta, localMeta, vaultStats);
