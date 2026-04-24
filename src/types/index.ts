@@ -29,7 +29,7 @@ export interface DriveSessionTokens {
 export const DEFAULT_DRIVE_SYNC_SETTINGS: DriveSyncSettings = {
   enabled: false,
   encryptedAuth: null,
-  excludePatterns: ["node_modules/"],
+  excludePatterns: ["node_modules/", ".*"],
   autoSync: false,
   syncIntervalMinutes: 5,
   rootFolderName: "gemihub",
