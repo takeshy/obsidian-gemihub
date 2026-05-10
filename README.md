@@ -1,10 +1,10 @@
 # GemiHub - Drive Sync for Obsidian
 
-Sync your Obsidian vault with Google Drive, fully compatible with [GemiHub](https://gemihub.online). Edit notes in Obsidian and access them from GemiHub's web interface, or vice versa.
+Sync your Obsidian vault with Google Drive, fully compatible with [GemiHub](https://gemihub.net). Edit notes in Obsidian and access them from GemiHub's web interface, or vice versa.
 
 ## What is GemiHub?
 
-[GemiHub](https://gemihub.online) is a web application that turns Google Gemini into a personal AI assistant integrated with your Google Drive.
+[GemiHub](https://gemihub.net) is a web application that turns Google Gemini into a personal AI assistant integrated with your Google Drive.
 
 ![GemiHub Interface](docs/images/gemihub_connection/push_pull.png)
 
@@ -35,7 +35,7 @@ These features are only available through GemiHub's web interface:
 
 ## Prerequisites
 
-You need a [GemiHub](https://gemihub.online) account with Google Drive sync configured. The plugin uses GemiHub's encrypted authentication token to connect to your Google Drive.
+You need a [GemiHub](https://gemihub.net) account with Google Drive sync configured. The plugin uses GemiHub's encrypted authentication token to connect to your Google Drive.
 
 1. Sign in to GemiHub
 2. Go to **Settings** → **Obsidian Sync** section

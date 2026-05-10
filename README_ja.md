@@ -1,10 +1,10 @@
 # GemiHub - Drive Sync for Obsidian
 
-Obsidian の Vault を Google Drive と同期し、[GemiHub](https://gemihub.online) と完全互換で連携できます。Obsidian でノートを編集し、GemiHub の Web インターフェースからアクセスすることも、その逆も可能です。
+Obsidian の Vault を Google Drive と同期し、[GemiHub](https://gemihub.net) と完全互換で連携できます。Obsidian でノートを編集し、GemiHub の Web インターフェースからアクセスすることも、その逆も可能です。
 
 ## GemiHub とは？
 
-[GemiHub](https://gemihub.online) は、Google Gemini を Google Drive と統合されたパーソナル AI アシスタントに変える Web アプリケーションです。
+[GemiHub](https://gemihub.net) は、Google Gemini を Google Drive と統合されたパーソナル AI アシスタントに変える Web アプリケーションです。
 
 ![GemiHub インターフェース](docs/images/gemihub_connection/push_pull.png)
 
@@ -35,7 +35,7 @@ Obsidian の Vault を Google Drive と同期し、[GemiHub](https://gemihub.onl
 
 ## 事前準備
 
-[GemiHub](https://gemihub.online) アカウントで Google Drive 同期が設定済みである必要があります。プラグインは GemiHub の暗号化認証トークンを使用して Google Drive に接続します。
+[GemiHub](https://gemihub.net) アカウントで Google Drive 同期が設定済みである必要があります。プラグインは GemiHub の暗号化認証トークンを使用して Google Drive に接続します。
 
 1. GemiHub にサインイン
 2. **Settings** → **Obsidian Sync** セクションを開く
