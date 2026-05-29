@@ -44,6 +44,7 @@ import {
 import {
   isSyncExcludedPath,
   isBinaryExtension,
+  isGoogleWorkspaceMimeType,
   getMimeType,
   md5Hash,
   md5HashString,
@@ -446,6 +447,43 @@ export class DriveSyncManager {
   }
 
   /**
+   * Google Workspace files (Sheets/Docs/etc.) cannot be downloaded via
+   * Drive's alt=media endpoint. GemiHub owns those through Workspace APIs, so
+   * Obsidian sync ignores them while preserving their entries in remote meta.
+   */
+  private getObsidianSyncableRemoteMeta(remoteMeta: SyncMeta | null): SyncMeta | null {
+    if (!remoteMeta) return null;
+    return {
+      lastUpdatedAt: remoteMeta.lastUpdatedAt,
+      files: Object.fromEntries(
+        Object.entries(remoteMeta.files).filter(([, f]) => !isGoogleWorkspaceMimeType(f.mimeType))
+      ),
+    };
+  }
+
+  private getObsidianSyncableLocalMeta(
+    localMeta: LocalDriveSyncMeta,
+    remoteMeta: SyncMeta | null
+  ): LocalDriveSyncMeta {
+    if (!remoteMeta) return localMeta;
+    const ignoredIds = new Set(
+      Object.entries(remoteMeta.files)
+        .filter(([, f]) => isGoogleWorkspaceMimeType(f.mimeType))
+        .map(([id]) => id)
+    );
+    if (ignoredIds.size === 0) return localMeta;
+    return {
+      lastUpdatedAt: localMeta.lastUpdatedAt,
+      files: Object.fromEntries(
+        Object.entries(localMeta.files).filter(([id]) => !ignoredIds.has(id))
+      ),
+      pathToId: Object.fromEntries(
+        Object.entries(localMeta.pathToId).filter(([, id]) => !ignoredIds.has(id))
+      ),
+    };
+  }
+
+  /**
    * Compute MD5 checksums for all vault files.
    * Skips MD5 computation when file mtime+size match the cached values in localMeta.
    * Returns checksums (path → md5) and vaultStats (path → {mtime, size}).
@@ -780,20 +818,22 @@ export class DriveSyncManager {
       const tokens = await this.getTokens();
       const localMeta = await readLocalSyncMeta(this.app);
       const remoteMeta = await this.readReconciledRemoteMeta(tokens.accessToken, tokens.rootFolderId);
+      const syncRemoteMeta = this.getObsidianSyncableRemoteMeta(remoteMeta);
+      const syncLocalMeta = this.getObsidianSyncableLocalMeta(localMeta, remoteMeta);
 
       const vaultFiles = await this.getAllVaultFiles();
-      const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
-      const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
+      const { checksums } = await this.computeVaultChecksums(vaultFiles, syncLocalMeta);
+      const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(syncLocalMeta, checksums);
 
-      const diff = computeSyncDiff(localMeta, remoteMeta, modifiedIds);
+      const diff = computeSyncDiff(syncLocalMeta, syncRemoteMeta, modifiedIds);
 
       // Detect files tracked in meta but physically missing from disk (exclude intentional deletions)
-      const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds, newPaths);
+      const missingLocal = this.findMissingLocalFiles(syncLocalMeta, syncRemoteMeta, checksums, diff, renames, deletedIds, newPaths);
       diff.toPull.push(...missingLocal);
 
       // Resolve id → path for exclusion filtering
-      const idToPath = buildIdToPathMap(localMeta);
-      const remoteFiles = remoteMeta?.files ?? {};
+      const idToPath = buildIdToPathMap(syncLocalMeta);
+      const remoteFiles = syncRemoteMeta?.files ?? {};
       const resolvePath = (id: string): string | null => idToPath[id] || remoteFiles[id]?.name || null;
 
       const isExcludedId = (id: string): boolean => {
@@ -819,10 +859,10 @@ export class DriveSyncManager {
       this.localModifiedCount = pushCount;
 
       // Pull count = remote changes + remote-only + locally-deleted-remotely + conflicts (excluding excluded paths)
-      if (!remoteMeta) {
+      if (!syncRemoteMeta) {
         this.remoteModifiedCount = 0;
       } else {
-        const pullLocalOnly = diff.localOnly.filter(id => id in localMeta.files);
+        const pullLocalOnly = diff.localOnly.filter(id => id in syncLocalMeta.files);
         // Filter remoteOnly: skip files that already exist locally with matching content
         // (matches computeSyncFileList logic)
         const remoteOnlyCount = diff.remoteOnly.filter(id => {
@@ -936,23 +976,25 @@ export class DriveSyncManager {
     const tokens = await this.getTokens();
     const localMeta = await readLocalSyncMeta(this.app);
     const remoteMeta = await this.readReconciledRemoteMeta(tokens.accessToken, tokens.rootFolderId);
+    const syncRemoteMeta = this.getObsidianSyncableRemoteMeta(remoteMeta);
+    const syncLocalMeta = this.getObsidianSyncableLocalMeta(localMeta, remoteMeta);
 
     const vaultFiles = await this.getAllVaultFiles();
-    const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
-    const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
+    const { checksums } = await this.computeVaultChecksums(vaultFiles, syncLocalMeta);
+    const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(syncLocalMeta, checksums);
 
-    const diff = computeSyncDiff(localMeta, remoteMeta, modifiedIds);
+    const diff = computeSyncDiff(syncLocalMeta, syncRemoteMeta, modifiedIds);
 
     // Detect files tracked in meta but physically missing from disk (for pull, exclude intentional deletions)
     if (direction === "pull") {
-      const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds, newPaths);
+      const missingLocal = this.findMissingLocalFiles(syncLocalMeta, syncRemoteMeta, checksums, diff, renames, deletedIds, newPaths);
       diff.toPull.push(...missingLocal);
     }
 
-    const remoteFiles = remoteMeta?.files ?? {};
-    const idToPath = buildIdToPathMap(localMeta);
-    const catchAllPlan = direction === "pull" && remoteMeta
-      ? this.planCatchAllPullActions(localMeta, remoteMeta, diff, checksums)
+    const remoteFiles = syncRemoteMeta?.files ?? {};
+    const idToPath = buildIdToPathMap(syncLocalMeta);
+    const catchAllPlan = direction === "pull" && syncRemoteMeta
+      ? this.planCatchAllPullActions(syncLocalMeta, syncRemoteMeta, diff, checksums)
       : null;
 
     const files: SyncFileListItem[] = [];
@@ -966,7 +1008,7 @@ export class DriveSyncManager {
         files.push({ id: path, name: path, type: "new" });
       }
       for (const [oldPath, newPath] of renames) {
-        const fileId = localMeta.pathToId[oldPath] || oldPath;
+        const fileId = syncLocalMeta.pathToId[oldPath] || oldPath;
         files.push({ id: fileId, name: newPath, type: "renamed", oldName: oldPath });
       }
       for (const id of diff.editDeleteConflicts) {
@@ -1004,7 +1046,7 @@ export class DriveSyncManager {
         files.push({ id, name, type: "modified" });
       }
       for (const id of diff.localOnly) {
-        if (!(id in localMeta.files)) continue;
+        if (!(id in syncLocalMeta.files)) continue;
         const name = idToPath[id] || id;
         files.push({ id, name, type: "deleted" });
       }
@@ -1031,7 +1073,7 @@ export class DriveSyncManager {
     const filtered = files.filter((f) => !this.isExcludedPath(f.name));
 
     // Detect remote changes that would block a push
-    const localMetaFiles = localMeta?.files ?? {};
+    const localMetaFiles = syncLocalMeta?.files ?? {};
     const remoteDeletedCount = diff.localOnly.filter(id => id in localMetaFiles).length;
     const hasRemoteChanges =
       diff.conflicts.length > 0 ||
@@ -1067,22 +1109,24 @@ export class DriveSyncManager {
       // 1. Get local and remote meta
       const localMeta = await readLocalSyncMeta(this.app);
       let remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
+      const syncLocalMeta = this.getObsidianSyncableLocalMeta(localMeta, remoteMeta);
+      const syncRemoteMeta = this.getObsidianSyncableRemoteMeta(remoteMeta);
 
       // 2. Compute vault checksums and find modified files
       const vaultFiles = await this.getAllVaultFiles();
-      const { checksums, vaultStats } = await this.computeVaultChecksums(vaultFiles, localMeta);
-      const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
+      const { checksums, vaultStats } = await this.computeVaultChecksums(vaultFiles, syncLocalMeta);
+      const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(syncLocalMeta, checksums);
 
       // 3. Compute diff (exclude renamed file IDs from localOnly detection)
       const renamedFileIds = new Set<string>();
       for (const [oldPath] of renames) {
-        const fid = localMeta.pathToId[oldPath];
+        const fid = syncLocalMeta.pathToId[oldPath];
         if (fid) renamedFileIds.add(fid);
       }
-      const diff = computeSyncDiff(localMeta, remoteMeta, modifiedIds);
+      const diff = computeSyncDiff(syncLocalMeta, syncRemoteMeta, modifiedIds);
 
       // 4. Reject push if remote has changes
-      const localMetaFiles = localMeta?.files ?? {};
+      const localMetaFiles = syncLocalMeta?.files ?? {};
       const remoteDeletedCount = diff.localOnly.filter(id => id in localMetaFiles && !renamedFileIds.has(id)).length;
       if (
         diff.conflicts.length > 0 ||
@@ -1102,16 +1146,16 @@ export class DriveSyncManager {
         remoteMeta = { lastUpdatedAt: new Date().toISOString(), files: {} };
       }
 
-      const idToPath = buildIdToPathMap(localMeta);
+      const idToPath = buildIdToPathMap(syncLocalMeta);
 
       // 6. Handle renames (update Drive file name, no re-upload needed)
       for (const [oldPath, newPath] of renames) {
-        const fileId = localMeta.pathToId[oldPath];
+        const fileId = syncLocalMeta.pathToId[oldPath];
         if (!fileId) continue;
         const driveFile = await drive.renameFile(accessToken, fileId, newPath);
         // Update local meta path mapping
-        delete localMeta.pathToId[oldPath];
-        localMeta.pathToId[newPath] = fileId;
+        delete syncLocalMeta.pathToId[oldPath];
+        syncLocalMeta.pathToId[newPath] = fileId;
         // Update remote meta
         upsertFileInMeta(remoteMeta, driveFile, newPath);
       }
@@ -1133,8 +1177,8 @@ export class DriveSyncManager {
       for (let i = 0; i < allPathsToUpload.length; i += CONCURRENCY) {
         const batch = allPathsToUpload.slice(i, i + CONCURRENCY);
         await Promise.all(batch.map(async (path) => {
-          const existingId = localMeta.pathToId[path];
-          const result = await this.uploadFile(accessToken, rootFolderId, path, existingId, remoteMeta, localMeta, checksums);
+          const existingId = syncLocalMeta.pathToId[path];
+          const result = await this.uploadFile(accessToken, rootFolderId, path, existingId, remoteMeta, syncLocalMeta, checksums);
           uploadResults.push({ path, ...result });
         }));
       }
@@ -1173,8 +1217,8 @@ export class DriveSyncManager {
           try {
             await drive.moveFile(accessToken, fileId, trashFolderId, rootFolderId);
             removeFileFromMeta(remoteMeta, fileId);
-            delete localMeta.files[fileId];
-            delete localMeta.pathToId[path];
+            delete syncLocalMeta.files[fileId];
+            delete syncLocalMeta.pathToId[path];
           } catch (err) {
             console.warn(`[DriveSync] Failed to move file to trash on Drive: ${path}`, err);
           }
@@ -1186,7 +1230,7 @@ export class DriveSyncManager {
       await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
 
       // 11. Update local meta (with vault stats for mtime/size caching)
-      const updatedLocalMeta = toLocalSyncMeta(remoteMeta, localMeta, vaultStats);
+      const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, syncLocalMeta, vaultStats);
       await writeLocalSyncMeta(this.app, updatedLocalMeta);
 
       // 12. Save remote edit history in background (best-effort, does not block UI)
@@ -1338,8 +1382,10 @@ export class DriveSyncManager {
       // 1. Get local and remote meta (reconcile with actual Drive files to detect external deletions)
       const localMeta = await readLocalSyncMeta(this.app);
       const remoteMeta = await this.readReconciledRemoteMeta(accessToken, rootFolderId);
+      const syncRemoteMeta = this.getObsidianSyncableRemoteMeta(remoteMeta);
+      const syncLocalMeta = this.getObsidianSyncableLocalMeta(localMeta, remoteMeta);
 
-      if (!remoteMeta) {
+      if (!syncRemoteMeta) {
         new Notice("Drive sync: no remote data found. Push first.");
         this.syncStatus = "idle";
         return;
@@ -1347,14 +1393,14 @@ export class DriveSyncManager {
 
       // 2. Compute vault checksums and find modified files
       const vaultFiles = await this.getAllVaultFiles();
-      const { checksums } = await this.computeVaultChecksums(vaultFiles, localMeta);
-      const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(localMeta, checksums);
+      const { checksums } = await this.computeVaultChecksums(vaultFiles, syncLocalMeta);
+      const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(syncLocalMeta, checksums);
 
       // 3. Compute diff
-      const diff = computeSyncDiff(localMeta, remoteMeta, modifiedIds);
+      const diff = computeSyncDiff(syncLocalMeta, syncRemoteMeta, modifiedIds);
 
       // 3.1. Re-download files tracked in meta but physically missing from disk (exclude intentional deletions)
-      const missingLocal = this.findMissingLocalFiles(localMeta, remoteMeta, checksums, diff, renames, deletedIds, newPaths);
+      const missingLocal = this.findMissingLocalFiles(syncLocalMeta, syncRemoteMeta, checksums, diff, renames, deletedIds, newPaths);
       diff.toPull.push(...missingLocal);
 
       // 3.5. Guard: detect untracked local files that would be overwritten,
@@ -1363,7 +1409,7 @@ export class DriveSyncManager {
       const alreadyMatchedIds: string[] = [];
       const untrackedConflicts: ConflictInfo[] = [];
       for (const fileId of diff.remoteOnly) {
-        const fileMeta = remoteMeta.files[fileId];
+        const fileMeta = syncRemoteMeta.files[fileId];
         if (!fileMeta) { safeRemoteOnly.push(fileId); continue; }
         const vaultPath = fileMeta.name;
         const localChecksum = checksums.get(vaultPath);
@@ -1390,10 +1436,10 @@ export class DriveSyncManager {
       // Track already-matched files in local metadata (no download needed)
       if (alreadyMatchedIds.length > 0) {
         for (const fileId of alreadyMatchedIds) {
-          const fileMeta = remoteMeta.files[fileId];
+          const fileMeta = syncRemoteMeta.files[fileId];
           if (!fileMeta) continue;
-          localMeta.pathToId[fileMeta.name] = fileId;
-          localMeta.files[fileId] = {
+          syncLocalMeta.pathToId[fileMeta.name] = fileId;
+          syncLocalMeta.files[fileId] = {
             md5Checksum: fileMeta.md5Checksum,
             modifiedTime: fileMeta.modifiedTime ?? "",
             name: fileMeta.name,
@@ -1401,7 +1447,7 @@ export class DriveSyncManager {
         }
       }
 
-      const catchAllPlan = this.planCatchAllPullActions(localMeta, remoteMeta, diff, checksums, ignoredIds);
+      const catchAllPlan = this.planCatchAllPullActions(syncLocalMeta, syncRemoteMeta, diff, checksums, ignoredIds);
       if (catchAllPlan.blockedRenames.length > 0) {
         const first = catchAllPlan.blockedRenames[0];
         const count = catchAllPlan.blockedRenames.length;
@@ -1412,14 +1458,14 @@ export class DriveSyncManager {
       // 4. Handle conflicts
       const allConflicts: ConflictInfo[] = [...diff.conflicts, ...untrackedConflicts];
       if (diff.editDeleteConflicts.length > 0) {
-        const idToPath = buildIdToPathMap(localMeta);
+        const idToPath = buildIdToPathMap(syncLocalMeta);
         for (const fid of diff.editDeleteConflicts) {
           allConflicts.push({
             fileId: fid,
             fileName: idToPath[fid] || fid,
-            localChecksum: localMeta.files[fid]?.md5Checksum ?? "",
+            localChecksum: syncLocalMeta.files[fid]?.md5Checksum ?? "",
             remoteChecksum: "",
-            localModifiedTime: localMeta.files[fid]?.modifiedTime ?? "",
+            localModifiedTime: syncLocalMeta.files[fid]?.modifiedTime ?? "",
             remoteModifiedTime: "",
             isEditDelete: true,
           });
@@ -1433,7 +1479,7 @@ export class DriveSyncManager {
       }
 
       // 5. Process the diff
-      const cleanup = await this.applyPullDiff(accessToken, rootFolderId, localMeta, remoteMeta, diff, catchAllPlan, ignoredIds);
+      const cleanup = await this.applyPullDiff(accessToken, rootFolderId, syncLocalMeta, syncRemoteMeta, diff, catchAllPlan, ignoredIds);
 
       this.syncStatus = "idle";
       const ignoredCount = ignoredIds?.size ?? 0;
@@ -1591,7 +1637,7 @@ export class DriveSyncManager {
     for (const f of await this.getAllVaultFiles()) {
       vaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
     }
-    const updatedLocalMeta = toLocalSyncMeta(remoteMeta, localMeta, vaultStats);
+    const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, localMeta, vaultStats);
     await writeLocalSyncMeta(this.app, updatedLocalMeta);
 
     return { cleanupDeleted: cleanupDeleteCount, cleanupRenamed: cleanupRenameCount };
@@ -1609,6 +1655,10 @@ export class DriveSyncManager {
   ): Promise<void> {
     const fileMeta = remoteMeta.files[fileId];
     if (!fileMeta) return;
+    if (isGoogleWorkspaceMimeType(fileMeta.mimeType)) {
+      console.warn("[DriveSync] Skipping Google Workspace file:", fileMeta.name);
+      return;
+    }
 
     // Use Drive name as vault path (always current; path field can be stale after renames)
     const vaultPath = fileMeta.name;
@@ -1726,7 +1776,8 @@ export class DriveSyncManager {
 
       // Get remote meta (or rebuild)
       const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
-      if (!remoteMeta) {
+      const syncRemoteMeta = this.getObsidianSyncableRemoteMeta(remoteMeta);
+      if (!syncRemoteMeta) {
         new Notice("Drive sync: no remote data found");
         this.syncStatus = "idle";
         return;
@@ -1740,13 +1791,13 @@ export class DriveSyncManager {
       };
 
       // Download all remote files
-      const fileIds = Object.keys(remoteMeta.files);
+      const fileIds = Object.keys(syncRemoteMeta.files);
       let downloadedCount = 0;
 
       for (let i = 0; i < fileIds.length; i += CONCURRENCY) {
         const batch = fileIds.slice(i, i + CONCURRENCY);
         await Promise.all(batch.map(async (fileId) => {
-          await this.downloadFile(accessToken, rootFolderId, fileId, remoteMeta, newLocalMeta);
+          await this.downloadFile(accessToken, rootFolderId, fileId, syncRemoteMeta, newLocalMeta);
           downloadedCount++;
         }));
       }
@@ -1784,9 +1835,9 @@ export class DriveSyncManager {
       // appear as false "deleted" items in subsequent push checks.
       const downloadedIds = new Set(Object.keys(newLocalMeta.files));
       const filteredRemoteMeta: SyncMeta = {
-        lastUpdatedAt: remoteMeta.lastUpdatedAt,
+        lastUpdatedAt: syncRemoteMeta.lastUpdatedAt,
         files: Object.fromEntries(
-          Object.entries(remoteMeta.files).filter(([id]) => downloadedIds.has(id))
+          Object.entries(syncRemoteMeta.files).filter(([id]) => downloadedIds.has(id))
         ),
       };
       const updatedLocalMeta = toLocalSyncMeta(filteredRemoteMeta, newLocalMeta, freshVaultStats);
@@ -1822,10 +1873,30 @@ export class DriveSyncManager {
       const tokens = await this.getTokens();
       const { accessToken, rootFolderId } = tokens;
 
-      // Build fresh remote meta (full push = local is authoritative)
+      const existingRemoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
+      const existingRemoteFiles = await drive.listUserFiles(accessToken, rootFolderId);
+
+      // Build fresh remote meta (full push = local is authoritative for
+      // Obsidian-syncable files, but preserves Google Workspace files for GemiHub).
       const remoteMeta: SyncMeta = {
         lastUpdatedAt: new Date().toISOString(),
-        files: {},
+        files: Object.fromEntries(
+          existingRemoteFiles
+            .filter((file) => isGoogleWorkspaceMimeType(file.mimeType))
+            .map((file) => {
+              const prev = existingRemoteMeta?.files[file.id];
+              return [file.id, {
+                name: file.name,
+                path: prev?.path,
+                mimeType: file.mimeType,
+                md5Checksum: file.md5Checksum ?? "",
+                modifiedTime: file.modifiedTime ?? "",
+                createdTime: file.createdTime,
+                shared: prev?.shared,
+                webViewLink: prev?.webViewLink,
+              }];
+            })
+        ),
       };
 
       // Build fresh local meta
@@ -1837,7 +1908,6 @@ export class DriveSyncManager {
 
       // Read existing local meta to reuse Drive file IDs
       const oldLocalMeta = await readLocalSyncMeta(this.app);
-      const existingRemoteFiles = await drive.listUserFiles(accessToken, rootFolderId);
 
       // Get all vault files and compute checksums
       const vaultFiles = await this.getAllVaultFiles();
@@ -1862,6 +1932,7 @@ export class DriveSyncManager {
       const trackedIds = new Set(Object.keys(remoteMeta.files));
       const filesToTrash = existingRemoteFiles.filter((file) => {
         if (trackedIds.has(file.id)) return false;
+        if (isGoogleWorkspaceMimeType(file.mimeType)) return false;
         if (this.isExcludedPath(file.name)) return false;
         return true;
       });
@@ -1877,7 +1948,7 @@ export class DriveSyncManager {
       await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
 
       // Save local meta (with vault stats for mtime/size caching)
-      const updatedLocalMeta = toLocalSyncMeta(remoteMeta, newLocalMeta, fullPushVaultStats);
+      const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, newLocalMeta, fullPushVaultStats);
       await writeLocalSyncMeta(this.app, updatedLocalMeta);
 
       this.syncStatus = "idle";
@@ -2009,7 +2080,7 @@ export class DriveSyncManager {
     for (const f of await this.getAllVaultFiles()) {
       vaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
     }
-    const updatedLocalMeta = toLocalSyncMeta(remoteMeta, localMeta, vaultStats);
+    const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, localMeta, vaultStats);
     await writeLocalSyncMeta(this.app, updatedLocalMeta);
   }
 
@@ -2068,7 +2139,7 @@ export class DriveSyncManager {
     for (const f of await this.getAllVaultFiles()) {
       vaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
     }
-    const updatedLocalMeta = toLocalSyncMeta(remoteMeta, localMeta, vaultStats);
+    const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, localMeta, vaultStats);
     await writeLocalSyncMeta(this.app, updatedLocalMeta);
   }
 

@@ -76,6 +76,10 @@ export function isBinaryMimeType(mimeType: string | undefined | null): boolean {
   return BINARY_APPLICATION_PREFIXES.some((p) => mimeType.startsWith(p));
 }
 
+export function isGoogleWorkspaceMimeType(mimeType: string | undefined | null): boolean {
+  return Boolean(mimeType?.startsWith("application/vnd.google-apps."));
+}
+
 export function looksLikeBinary(content: string): boolean {
   const sample = content.slice(0, 512);
   if (sample.length === 0) return false;
