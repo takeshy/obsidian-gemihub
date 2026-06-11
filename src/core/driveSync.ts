@@ -1047,7 +1047,11 @@ export class DriveSyncManager {
       }
       for (const id of diff.localOnly) {
         if (!(id in syncLocalMeta.files)) continue;
-        const name = idToPath[id] || id;
+        // Show the path that will actually be deleted: a pending local
+        // rename means the file now lives at the renamed path (applyPullDiff
+        // resolves the same way).
+        const trackedPath = idToPath[id];
+        const name = (trackedPath && renames.get(trackedPath)) || trackedPath || id;
         files.push({ id, name, type: "deleted" });
       }
       for (const id of diff.editDeleteConflicts) {
@@ -1106,9 +1110,10 @@ export class DriveSyncManager {
       const tokens = await this.getTokens();
       const { accessToken, rootFolderId } = tokens;
 
-      // 1. Get local and remote meta
+      // 1. Get local and remote meta (reconcile with actual Drive files so
+      //    external deletions missing from _sync-meta.json still block the push)
       const localMeta = await readLocalSyncMeta(this.app);
-      let remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
+      let remoteMeta = await this.readReconciledRemoteMeta(accessToken, rootFolderId);
       const syncLocalMeta = this.getObsidianSyncableLocalMeta(localMeta, remoteMeta);
       const syncRemoteMeta = this.getObsidianSyncableRemoteMeta(remoteMeta);
 
@@ -1117,7 +1122,7 @@ export class DriveSyncManager {
       const { checksums, vaultStats } = await this.computeVaultChecksums(vaultFiles, syncLocalMeta);
       const { modifiedIds, newPaths, renames, deletedIds } = this.findLocallyModifiedFiles(syncLocalMeta, checksums);
 
-      // 3. Compute diff (exclude renamed file IDs from localOnly detection)
+      // 3. Compute diff
       const renamedFileIds = new Set<string>();
       for (const [oldPath] of renames) {
         const fid = syncLocalMeta.pathToId[oldPath];
@@ -1126,8 +1131,12 @@ export class DriveSyncManager {
       const diff = computeSyncDiff(syncLocalMeta, syncRemoteMeta, modifiedIds);
 
       // 4. Reject push if remote has changes
+      // A renamed file whose ID is localOnly means it was deleted on remote —
+      // pushing would resurrect the trashed Drive file via renameFile, so it
+      // must block the push like any other remote deletion (matches the
+      // hasRemoteChanges check in computeSyncFileList).
       const localMetaFiles = syncLocalMeta?.files ?? {};
-      const remoteDeletedCount = diff.localOnly.filter(id => id in localMetaFiles && !renamedFileIds.has(id)).length;
+      const remoteDeletedCount = diff.localOnly.filter(id => id in localMetaFiles).length;
       if (
         diff.conflicts.length > 0 ||
         diff.editDeleteConflicts.length > 0 ||
@@ -1479,7 +1488,7 @@ export class DriveSyncManager {
       }
 
       // 5. Process the diff
-      const cleanup = await this.applyPullDiff(accessToken, rootFolderId, syncLocalMeta, syncRemoteMeta, diff, catchAllPlan, ignoredIds);
+      const cleanup = await this.applyPullDiff(accessToken, rootFolderId, syncLocalMeta, syncRemoteMeta, diff, catchAllPlan, renames, checksums, ignoredIds);
 
       this.syncStatus = "idle";
       const ignoredCount = ignoredIds?.size ?? 0;
@@ -1553,16 +1562,32 @@ export class DriveSyncManager {
     remoteMeta: SyncMeta,
     diff: SyncDiff,
     catchAllPlan: CatchAllPullPlan,
+    renames: Map<string, string> = new Map(),
+    checksums: Map<string, string> = new Map(),
     ignoredIds?: Set<string>
   ): Promise<{ cleanupDeleted: number; cleanupRenamed: number }> {
     const idToPath = buildIdToPathMap(localMeta);
 
+    // Case-insensitive lookup of current on-disk paths (handles NTFS/macOS
+    // case divergence between tracked paths and the actual filesystem)
+    const diskPathByLower = new Map<string, string>();
+    for (const p of checksums.keys()) diskPathByLower.set(p.toLowerCase(), p);
+
     // 1. Delete localOnly files (remotely deleted)
+    // The local copy may no longer sit at its tracked path (pending local
+    // rename/move, or case divergence). Resolve the actual on-disk location
+    // before trashing — otherwise trashByPath silently no-ops while the meta
+    // entries below are still removed, leaving an untracked file on disk that
+    // the next push re-uploads to Drive as a new file.
     for (const fileId of diff.localOnly) {
-      const path = idToPath[fileId];
-      if (path) {
-        await this.trashByPath(path);
-        delete localMeta.pathToId[path];
+      const trackedPath = idToPath[fileId];
+      if (trackedPath) {
+        const target = renames.get(trackedPath)
+          ?? (checksums.has(trackedPath)
+            ? trackedPath
+            : diskPathByLower.get(trackedPath.toLowerCase()) ?? trackedPath);
+        await this.trashByPath(target);
+        delete localMeta.pathToId[trackedPath];
       }
       delete localMeta.files[fileId];
     }
