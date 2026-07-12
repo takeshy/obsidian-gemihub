@@ -792,8 +792,33 @@ export class DriveSyncManager {
     const driveFiles = await drive.listUserFiles(accessToken, rootFolderId);
     const driveFileIds = new Set(driveFiles.map(f => f.id));
     const staleIds = Object.keys(remoteMeta.files).filter(id => !driveFileIds.has(id));
-    if (staleIds.length > 0) {
-      for (const id of staleIds) {
+    const confirmedDeletedOrMovedIds: string[] = [];
+
+    // A file deleted in the Drive UI is usually still addressable by ID while
+    // it sits in Drive trash. listUserFiles() intentionally filters trashed
+    // files out, so verify every missing entry by ID before rewriting
+    // _sync-meta.json. Treat trashed files, permanently deleted files (404),
+    // and files moved outside the sync root as remote deletions for Obsidian.
+    // This makes pull previews show those deletions instead of silently
+    // keeping stale metadata.
+    for (const id of staleIds) {
+      try {
+        const file = await drive.getFileMetadata(accessToken, id);
+        if (file.trashed || !(file.parents ?? []).includes(rootFolderId)) {
+          confirmedDeletedOrMovedIds.push(id);
+        }
+      } catch (err) {
+        const message = formatError(err);
+        if (message.includes("Drive API error 404")) {
+          confirmedDeletedOrMovedIds.push(id);
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    if (confirmedDeletedOrMovedIds.length > 0) {
+      for (const id of confirmedDeletedOrMovedIds) {
         delete remoteMeta.files[id];
       }
       remoteMeta.lastUpdatedAt = new Date().toISOString();
