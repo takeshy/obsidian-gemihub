@@ -191,6 +191,7 @@ export async function saveEditToDrive(
     model?: string;
   }
 ): Promise<DriveEditHistoryEntry | null> {
+  if (!settings.enabled) return null;
   const { diff, stats } = createDiffStr(params.oldContent, params.newContent, settings.diff.contextLines);
 
   if (stats.additions === 0 && stats.deletions === 0) return null;
@@ -212,6 +213,9 @@ export async function saveEditToDrive(
   );
 
   history.entries.push(entry);
+  // Keep remote history bounded: the complete JSON document is uploaded on
+  // every edit, so an unlimited list eventually makes each push progressively slower.
+  history.entries = history.entries.slice(-100);
 
   await saveHistoryFile(accessToken, historyFolderId, params.path, history, historyFileId);
 

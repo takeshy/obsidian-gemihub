@@ -99,9 +99,10 @@ export class DriveSyncDiffModal extends Modal {
         .setCta()
         .onClick(() => {
           const resolve = this.resolve;
+          const ignoredIds = this.ignoredIds.size > 0 ? new Set(this.ignoredIds) : undefined;
           this.resolve = null;
           this.close();
-          resolve?.({ confirmed: true, ignoredIds: this.ignoredIds.size > 0 ? this.ignoredIds : undefined });
+          resolve?.({ confirmed: true, ignoredIds });
         })
     );
   }
@@ -187,12 +188,14 @@ export class DriveSyncDiffModal extends Modal {
         this.resolve = null;
         this.close();
         resolve?.({ confirmed: false });
-        void this.app.workspace.openLinkText(file.name, "", false);
+        const target = this.app.vault.getAbstractFileByPath(file.name);
+        if (target instanceof TFile) void this.app.workspace.getLeaf(false).openFile(target);
       });
     }
 
-    // Ignore toggle (pull only, modified files only)
-    if (this.direction === "pull" && file.type === "modified") {
+    // Conflicts include blocked remote renames. Allow skipping those so pull
+    // never becomes an error-only dead end with no user action available.
+    if (this.direction === "pull" && (file.type === "modified" || file.type === "conflict")) {
       const ignoreBtn = headerEl.createEl("button", { cls: "gemihub-sync-diff-toggle" });
       const ignoreIconEl = ignoreBtn.createSpan();
       setIcon(ignoreIconEl, "eye-off");

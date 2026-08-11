@@ -16,7 +16,7 @@ import { ConfirmModal } from "src/ui/components/ConfirmModal";
 const WORKSPACE_STATE_FILENAME = "gemini-workspace.json";
 
 export class GemiHubPlugin extends Plugin {
-  settings: GemiHubSettings = DEFAULT_SETTINGS;
+  settings: GemiHubSettings = structuredClone(DEFAULT_SETTINGS);
   workspaceState: WorkspaceState = { ...DEFAULT_WORKSPACE_STATE };
   driveSyncManager: DriveSyncManager | null = null;
   driveSyncUI!: DriveSyncUIManager;
@@ -49,8 +49,17 @@ export class GemiHubPlugin extends Plugin {
   // ---- Settings persistence ----
 
   async loadSettings(): Promise<void> {
-    const data = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    const data = (await this.loadData()) as Partial<GemiHubSettings> | null;
+    this.settings = {
+      ...structuredClone(DEFAULT_SETTINGS),
+      ...data,
+      driveSync: { ...DEFAULT_SETTINGS.driveSync, ...data?.driveSync },
+      editHistory: {
+        ...DEFAULT_SETTINGS.editHistory,
+        ...data?.editHistory,
+        diff: { ...DEFAULT_SETTINGS.editHistory.diff, ...data?.editHistory?.diff },
+      },
+    };
   }
 
   async saveSettings(): Promise<void> {
