@@ -1,12 +1,15 @@
 {
   "name": "obsidian-gemihub",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "Sync Obsidian vault with Google Drive via GemiHub",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "lint": "npx eslint src/",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:types": "tsc -p tests",
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
   "keywords": [
@@ -19,6 +22,7 @@
   "author": "takeshy",
   "license": "MIT",
   "devDependencies": {
+    "@eslint/json": "^0.14.0",
     "@types/diff": "^7.0.2",
     "@types/node": "^16.11.6",
     "esbuild": "0.25.0",
@@ -27,7 +31,8 @@
     "obsidian": "latest",
     "tslib": "2.4.0",
     "typescript": "5.8.3",
-    "typescript-eslint": "^8.57.1"
+    "typescript-eslint": "^8.57.1",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "@google/genai": "^1.46.0",

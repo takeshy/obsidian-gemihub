@@ -22,6 +22,8 @@ export class DriveSyncConflictModal extends Modal {
   private onAllResolved: () => void;
   private resolving = false;
   private diffStates: Record<string, DiffState> = {};
+  private statusEl: HTMLElement | null = null;
+  private progress: { done: number; total: number } | null = null;
 
   constructor(
     app: App,
@@ -86,9 +88,19 @@ export class DriveSyncConflictModal extends Modal {
     });
 
     if (this.resolving) {
-      const statusEl = contentEl.createDiv({ cls: "gemihub-conflict-resolving-status" });
-      statusEl.setText(t("driveSync.resolving"));
+      this.statusEl = contentEl.createDiv({ cls: "gemihub-conflict-resolving-status" });
+      this.statusEl.setText(this.progressText());
+    } else {
+      this.statusEl = null;
     }
+  }
+
+  private progressText(): string {
+    if (!this.progress) return t("driveSync.resolving");
+    return t("driveSync.resolvingProgress", {
+      done: String(this.progress.done),
+      total: String(this.progress.total),
+    });
   }
 
   private renderConflictItem(container: HTMLElement, conflict: ConflictInfo): void {
@@ -262,56 +274,61 @@ export class DriveSyncConflictModal extends Modal {
     }
   }
 
-  private async resolveOne(fileId: string, choice: "local" | "remote"): Promise<void> {
-    if (this.resolving) return;
-    this.resolving = true;
-    this.onOpen();
-
-    try {
-      await this.syncManager.resolveConflict(fileId, choice);
-      this.conflicts = this.conflicts.filter(c => c.fileId !== fileId);
-
-      if (this.conflicts.length === 0) {
-        this.close();
-        this.onAllResolved();
-        return;
-      }
-    } catch (err) {
-      new Notice(`Conflict resolution failed: ${formatError(err)}`);
-    } finally {
-      this.resolving = false;
-    }
-    // Re-render
-    this.onOpen();
+  private resolveOne(fileId: string, choice: "local" | "remote"): Promise<void> {
+    return this.runResolve([fileId], choice);
   }
 
-  private async resolveAll(choice: "local" | "remote"): Promise<void> {
-    if (this.resolving) return;
+  private resolveAll(choice: "local" | "remote"): Promise<void> {
+    return this.runResolve(this.conflicts.map(c => c.fileId), choice);
+  }
+
+  /**
+   * Single path for both the per-row buttons and the bulk actions: the manager
+   * resolves the whole set in one batch, so metadata and vault scans happen
+   * once instead of once per file.
+   */
+  private async runResolve(fileIds: string[], choice: "local" | "remote"): Promise<void> {
+    if (this.resolving || fileIds.length === 0) return;
     this.resolving = true;
+    this.progress = { done: 0, total: fileIds.length };
     this.onOpen();
 
-    let failCount = 0;
-    for (const conflict of [...this.conflicts]) {
-      try {
-        await this.syncManager.resolveConflict(conflict.fileId, choice);
-        this.conflicts = this.conflicts.filter(c => c.fileId !== conflict.fileId);
-      } catch {
-        failCount++;
-      }
+    let result = { resolved: 0, failed: 0 };
+    let threw = false;
+    try {
+      result = await this.syncManager.resolveConflicts(fileIds, choice, (done, total) => {
+        // Update the status line in place: a full re-render would collapse any
+        // diff panel the user has open.
+        this.progress = { done, total };
+        this.statusEl?.setText(this.progressText());
+      });
+    } catch (err) {
+      threw = true;
+      new Notice(t("driveSync.resolveFailed", { error: formatError(err) }));
+    } finally {
+      this.resolving = false;
+      this.progress = null;
     }
 
-    this.resolving = false;
-    if (failCount > 0) {
-      new Notice(`${failCount} conflict(s) failed to resolve`);
-      this.onOpen();
-    } else {
+    // The manager is the source of truth for what is still unresolved.
+    this.conflicts = [...this.syncManager.conflicts];
+
+    // A throw already reported the cause; don't stack a second notice on it.
+    if (!threw && result.failed > 0) {
+      new Notice(t("driveSync.resolveFailedCount", { count: String(result.failed) }));
+    }
+    if (this.conflicts.length === 0) {
       this.close();
       this.onAllResolved();
+      return;
     }
+    this.onOpen();
   }
 
   onClose(): void {
     this.diffStates = {};
+    this.statusEl = null;
+    this.progress = null;
     this.contentEl.empty();
   }
 }

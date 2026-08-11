@@ -1,9 +1,8 @@
 // Conflict backup management modal for Google Drive sync.
-// Lists files in the sync_conflicts/ folder and allows restore or deletion.
+// Lists files in the local conflict-backups/ folder and allows restore or deletion.
 
 import { Modal, App, Setting, Notice } from "obsidian";
-import type { DriveSyncManager } from "src/core/driveSync";
-import type { DriveFile } from "src/core/googleDrive";
+import type { ConflictBackupEntry, DriveSyncManager } from "src/core/driveSync";
 import { isBinaryExtension } from "src/core/driveSyncUtils";
 import { restorePathFromConflictBackupName } from "src/core/driveSyncMeta";
 import { t } from "src/i18n";
@@ -12,7 +11,7 @@ import { ConfirmModal } from "./ConfirmModal";
 
 export class DriveConflictBackupModal extends Modal {
   private syncManager: DriveSyncManager;
-  private files: DriveFile[] = [];
+  private files: ConflictBackupEntry[] = [];
   private selected = new Set<string>();
   private loading = true;
   private processing = false;
@@ -65,7 +64,7 @@ export class DriveConflictBackupModal extends Modal {
       .setName(t("driveSync.selectAll"))
       .addToggle((toggle) =>
         toggle.setValue(this.selected.size === this.files.length).onChange((val) => {
-          if (val) { this.files.forEach((f) => this.selected.add(f.id)); }
+          if (val) { this.files.forEach((f) => this.selected.add(f.path)); }
           else { this.selected.clear(); }
           this.render();
         })
@@ -74,7 +73,7 @@ export class DriveConflictBackupModal extends Modal {
     // File list
     const listEl = contentEl.createDiv({ cls: "gemihub-drive-file-list" });
     for (const file of this.files) {
-      const desc = file.modifiedTime ? new Date(file.modifiedTime).toLocaleString() : "";
+      const desc = new Date(file.mtime).toLocaleString();
       const displayName = restorePathFromConflictBackupName(file.name);
       new Setting(listEl)
         .setName(displayName)
@@ -85,14 +84,14 @@ export class DriveConflictBackupModal extends Modal {
           })
         )
         .addToggle((toggle) =>
-          toggle.setValue(this.selected.has(file.id)).onChange((val) => {
-            if (val) { this.selected.add(file.id); }
-            else { this.selected.delete(file.id); }
+          toggle.setValue(this.selected.has(file.path)).onChange((val) => {
+            if (val) { this.selected.add(file.path); }
+            else { this.selected.delete(file.path); }
             this.render();
           })
         );
 
-      if (this.expandedPreview === file.id) {
+      if (this.expandedPreview === file.path) {
         this.renderPreviewPanel(listEl, file);
       }
     }
@@ -108,14 +107,14 @@ export class DriveConflictBackupModal extends Modal {
     deleteBtn.addEventListener("click", () => { if (this.selected.size > 0) void this.confirmAndDelete(); });
   }
 
-  private togglePreview(file: DriveFile): void {
-    if (this.expandedPreview === file.id) {
+  private togglePreview(file: ConflictBackupEntry): void {
+    if (this.expandedPreview === file.path) {
       this.expandedPreview = null;
       this.render();
       return;
     }
-    this.expandedPreview = file.id;
-    if (!this.previewCache.has(file.id)) {
+    this.expandedPreview = file.path;
+    if (!this.previewCache.has(file.path)) {
       this.render(); // show loading
       void this.fetchPreview(file);
     } else {
@@ -123,28 +122,28 @@ export class DriveConflictBackupModal extends Modal {
     }
   }
 
-  private async fetchPreview(file: DriveFile): Promise<void> {
+  private async fetchPreview(file: ConflictBackupEntry): Promise<void> {
     if (isBinaryExtension(file.name)) {
-      this.previewCache.set(file.id, null);
+      this.previewCache.set(file.path, null);
       this.render();
       return;
     }
     try {
-      const content = await this.syncManager.readRemoteFile(file.id);
-      this.previewCache.set(file.id, content);
+      const content = await this.syncManager.readConflictBackup(file.path);
+      this.previewCache.set(file.path, content);
     } catch {
-      this.previewCache.set(file.id, null);
+      this.previewCache.set(file.path, null);
     }
     this.render();
   }
 
-  private renderPreviewPanel(container: HTMLElement, file: DriveFile): void {
+  private renderPreviewPanel(container: HTMLElement, file: ConflictBackupEntry): void {
     const panel = container.createDiv({ cls: "gemihub-drive-preview-panel" });
     if (isBinaryExtension(file.name)) {
       panel.createDiv({ cls: "gemihub-drive-preview-loading", text: t("driveSync.previewBinary") });
       return;
     }
-    const cached = this.previewCache.get(file.id);
+    const cached = this.previewCache.get(file.path);
     if (cached === undefined) {
       panel.createDiv({ cls: "gemihub-drive-preview-loading", text: t("driveSync.loading") });
     } else if (cached === null) {
@@ -159,12 +158,11 @@ export class DriveConflictBackupModal extends Modal {
     this.render();
     let count = 0;
     let failCount = 0;
-    for (const fileId of this.selected) {
-      const file = this.files.find((f) => f.id === fileId);
+    for (const backupPath of this.selected) {
+      const file = this.files.find((f) => f.path === backupPath);
       if (!file) continue;
-      const restoreName = restorePathFromConflictBackupName(file.name);
       try {
-        await this.syncManager.restoreConflictFile(fileId, restoreName);
+        await this.syncManager.restoreConflictFile(backupPath, file.name);
         count++;
       } catch { failCount++; }
     }

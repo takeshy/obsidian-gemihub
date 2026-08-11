@@ -8,10 +8,8 @@ import {
   listUserFiles,
   readFile,
   createFile,
-  createFileBinary,
   updateFile,
   findFileByExactName,
-  ensureSubFolder,
   type DriveFile,
 } from "./googleDrive";
 import { SYNC_META_FILE_NAME, type SyncMeta } from "./syncDiff";
@@ -196,27 +194,60 @@ export function removeFileFromMeta(
   meta.lastUpdatedAt = new Date().toISOString();
 }
 
+export function getConflictBackupFolder(): string {
+  return `${WORKSPACE_FOLDER}/conflict-backups`;
+}
+
 /**
- * Save a conflict backup to the sync_conflicts/ folder on Drive.
+ * Save a conflict backup into the Vault.
+ *
+ * Backups used to be uploaded to sync_conflicts/ on Drive, which cost two
+ * round trips per file (folder lookup + upload) and dominated bulk conflict
+ * resolution. WORKSPACE_FOLDER is already sync-excluded (isSyncExcludedPath),
+ * so a local copy is never pushed back to Drive.
+ *
  * Supports both text (string) and binary (ArrayBuffer) content.
  */
 export async function saveConflictBackup(
-  accessToken: string,
-  rootFolderId: string,
+  app: App,
   fileName: string,
   content: string | ArrayBuffer
 ): Promise<void> {
-  const folderId = await ensureSubFolder(accessToken, rootFolderId, "sync_conflicts");
+  const folder = getConflictBackupFolder();
+  // Conflict resolution backs up files concurrently, so two callers can race on
+  // the same missing folder; mkdir failures are ignored and caught by the write.
+  for (const dir of [WORKSPACE_FOLDER, folder]) {
+    if (await app.vault.adapter.exists(dir)) continue;
+    try {
+      await app.vault.adapter.mkdir(dir);
+    } catch {
+      /* concurrent creation */
+    }
+  }
+  // buildConflictBackupName percent-encodes the path separators, so the result
+  // is always a single flat file name.
   const backupName = buildConflictBackupName(fileName);
+  let backupPath = `${folder}/${backupName}`;
+  let suffix = 1;
+  while (await app.vault.adapter.exists(backupPath)) {
+    const dot = backupName.lastIndexOf(".");
+    const uniqueName = dot > 0
+      ? `${backupName.slice(0, dot)}-${suffix}${backupName.slice(dot)}`
+      : `${backupName}-${suffix}`;
+    backupPath = `${folder}/${uniqueName}`;
+    suffix++;
+  }
   if (content instanceof ArrayBuffer) {
-    await createFileBinary(accessToken, backupName, content, folderId);
+    await app.vault.adapter.writeBinary(backupPath, content);
   } else {
-    await createFile(accessToken, backupName, content, folderId, "text/plain");
+    await app.vault.adapter.write(backupPath, content);
   }
 }
 
 export function buildConflictBackupName(filePath: string, now: Date = new Date()): string {
-  const ts = now.toISOString().replace(/[-:]/g, "").replace("T", "_").slice(0, 15);
+  const iso = now.toISOString();
+  const ts = iso.replace(/[-:]/g, "").replace("T", "_").slice(0, 15)
+    + "_" + iso.slice(20, 23);
   const encodedPath = encodeURIComponent(filePath);
   const dotIdx = encodedPath.lastIndexOf(".");
   const backupName = dotIdx > 0
@@ -234,7 +265,8 @@ export function restorePathFromConflictBackupName(name: string): string {
 }
 
 export function restoreOriginalPathFromConflictBackupName(name: string): string {
-  const match = name.match(/^(.+)_(\d{8}_\d{6})(\.[^.]+)?$/);
+  // Accept both legacy second-resolution names and current millisecond names.
+  const match = name.match(/^(.+)_(\d{8}_\d{6})(?:_\d{3})?(\.[^.]+)?$/);
   const baseName = match ? match[1] + (match[3] ?? "") : name;
   try {
     return decodeURIComponent(baseName);

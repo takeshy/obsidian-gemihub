@@ -37,6 +37,7 @@ import {
   upsertFileInMeta,
   removeFileFromMeta,
   saveConflictBackup,
+  getConflictBackupFolder,
   buildIdToPathMap,
   restorePathFromConflictBackupName,
   type LocalDriveSyncMeta,
@@ -186,6 +187,40 @@ function remoteSnapshotChanged(
  */
 type VaultFileEntry = { path: string; stat: { mtime: number; size: number } };
 
+/**
+ * Loop-invariant state shared by every item in one conflict-resolution batch.
+ *
+ * Resolving conflicts one at a time re-read the remote metadata, re-walked the
+ * whole vault and rewrote both metadata documents per file. Threading this
+ * context through the per-item resolvers lets all of that happen once.
+ */
+interface ConflictResolveContext {
+  /** Refreshed once per CONCURRENCY batch, not per item. */
+  accessToken: string;
+  rootFolderId: string;
+  localMeta: LocalDriveSyncMeta;
+  remoteMeta: SyncMeta;
+  /** Threaded into writeRemoteSyncMeta so the name lookup happens at most once. */
+  metaFileId: string | null;
+  /** Set only where remoteMeta is actually mutated; "keep remote" never is. */
+  remoteDirty: boolean;
+  /** IDs whose current in-memory entries must be merged into fresh remote meta. */
+  remoteUpsertIds: Set<string>;
+  /** IDs that this batch intentionally removed from remote meta. */
+  remoteDeleteIds: Set<string>;
+  /** Vault paths this batch wrote, re-stat'd once at flush time. */
+  touchedPaths: Set<string>;
+}
+
+/** A conflict backup file stored under the local conflict-backups folder. */
+export interface ConflictBackupEntry {
+  /** Full vault path of the backup file. */
+  path: string;
+  /** Base name; feeds restorePathFromConflictBackupName. */
+  name: string;
+  mtime: number;
+}
+
 export class DriveSyncManager {
   private app: App;
   private plugin: GemiHubPlugin;
@@ -288,8 +323,7 @@ export class DriveSyncManager {
       };
       await this.plugin.saveSettings();
 
-      // Back up locally modified files to sync_conflicts/ before resetting
-      const { accessToken } = this.sessionTokens;
+      // Back up locally modified files before resetting
       const localMeta = await readLocalSyncMeta(this.app);
       if (Object.keys(localMeta.files).length > 0) {
         const vaultFiles = await this.getAllVaultFiles();
@@ -304,10 +338,10 @@ export class DriveSyncManager {
             if (await this.app.vault.adapter.exists(path)) {
               if (isBinaryExtension(path)) {
                 const buf = await this.app.vault.adapter.readBinary(path);
-                await saveConflictBackup(accessToken, rootFolderId, path, buf);
+                await saveConflictBackup(this.app, path, buf);
               } else {
                 const content = await this.app.vault.adapter.read(path);
-                await saveConflictBackup(accessToken, rootFolderId, path, content);
+                await saveConflictBackup(this.app, path, content);
               }
               backupCount++;
             }
@@ -316,7 +350,7 @@ export class DriveSyncManager {
           }
         }
         if (backupCount > 0) {
-          new Notice(`Drive sync: backed up ${backupCount} modified file(s) to sync_conflicts.`);
+          new Notice(`Drive sync: backed up ${backupCount} modified file(s) to ${getConflictBackupFolder()}.`);
         }
       }
 
@@ -1870,13 +1904,12 @@ export class DriveSyncManager {
       delete localMeta.pathToId[item.oldPath];
       if (item.backupExistingTarget) {
         if (await this.app.vault.adapter.exists(item.newPath)) {
-          accessToken = (await this.getTokens()).accessToken;
           if (isBinaryExtension(item.newPath)) {
             const content = await this.app.vault.adapter.readBinary(item.newPath);
-            await saveConflictBackup(accessToken, rootFolderId, item.newPath, content);
+            await saveConflictBackup(this.app, item.newPath, content);
           } else {
             const content = await this.app.vault.adapter.read(item.newPath);
-            await saveConflictBackup(accessToken, rootFolderId, item.newPath, content);
+            await saveConflictBackup(this.app, item.newPath, content);
           }
         }
       }
@@ -2262,40 +2295,125 @@ export class DriveSyncManager {
   // Conflict Resolution
   // ========================================
 
-  async resolveConflict(fileId: string, choice: "local" | "remote"): Promise<void> {
+  /**
+   * Resolve conflicts in one batch.
+   *
+   * Everything loop-invariant — tokens, both metadata documents, the metadata
+   * file id, the vault walk — is done once for the whole batch, and the
+   * per-item network work runs CONCURRENCY-wide. Resolving items one at a time
+   * previously cost ~7 Drive round trips and a full vault walk *per file*.
+   *
+   * Individual failures are collected rather than thrown, so one bad file
+   * cannot abandon the rest of the batch.
+   */
+  async resolveConflicts(
+    fileIds: string[],
+    choice: "local" | "remote",
+    onProgress?: (done: number, total: number) => void
+  ): Promise<{ resolved: number; failed: number }> {
+    if (fileIds.length === 0) return { resolved: 0, failed: 0 };
     if (this.syncLock) {
-      console.warn("[DriveSync] resolveConflict skipped: sync already in progress");
-      return;
+      console.warn("[DriveSync] resolveConflicts skipped: sync already in progress");
+      return { resolved: 0, failed: fileIds.length };
     }
     this.syncLock = true;
     this.lastError = null;
 
+    const resolvedIds = new Set<string>();
+    let failed = 0;
     let shouldPull = false;
     try {
-      const tokens = await this.getTokens();
-      const { accessToken, rootFolderId } = tokens;
+      // A background refreshSyncCounts() rewrites _sync-meta.json underneath us;
+      // pull() and push() wait on it for the same reason before reading metadata.
+      await this.waitForRefreshCounts();
+
+      const { accessToken, rootFolderId } = await this.getTokens();
       const localMeta = await readLocalSyncMeta(this.app);
       const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
       if (!remoteMeta) throw new Error("Remote meta not found");
 
-      const conflict = this.conflicts.find(c => c.fileId === fileId);
-      if (!conflict) throw new Error("Conflict not found");
+      const ctx: ConflictResolveContext = {
+        accessToken,
+        rootFolderId,
+        localMeta,
+        remoteMeta,
+        metaFileId: null,
+        remoteDirty: false,
+        remoteUpsertIds: new Set(),
+        remoteDeleteIds: new Set(),
+        touchedPaths: new Set(),
+      };
 
       const idToPath = buildIdToPathMap(localMeta);
-      const vaultPath = idToPath[fileId] || conflict.fileName;
-
-      if (conflict.isEditDelete) {
-        await this.resolveEditDeleteConflict(
-          accessToken, rootFolderId, fileId, vaultPath, choice, localMeta, remoteMeta
-        );
-      } else {
-        await this.resolveNormalConflict(
-          accessToken, rootFolderId, fileId, vaultPath, choice, localMeta, remoteMeta
-        );
+      const items: { fileId: string; vaultPath: string; conflict: ConflictInfo }[] = [];
+      for (const fileId of fileIds) {
+        const conflict = this.conflicts.find(c => c.fileId === fileId);
+        if (!conflict) {
+          console.warn("[DriveSync] resolveConflicts: conflict not found:", fileId);
+          failed++;
+          continue;
+        }
+        items.push({ fileId, vaultPath: idToPath[fileId] || conflict.fileName, conflict });
       }
 
-      // Remove resolved conflict
-      this.conflicts = this.conflicts.filter(c => c.fileId !== fileId);
+      let lastCheckpointAt = Date.now();
+      const checkpointRemoteMeta = async (force = false): Promise<void> => {
+        if (!ctx.remoteDirty) return;
+        if (!force && Date.now() - lastCheckpointAt < PUSH_CHECKPOINT_INTERVAL_MS) return;
+        ctx.accessToken = (await this.getTokens()).accessToken;
+        const latest = await readRemoteSyncMeta(ctx.accessToken, ctx.rootFolderId);
+        if (!latest) throw new Error("Remote meta not found while saving conflict resolutions");
+        // Merge only this batch's mutations into the latest document so files
+        // added or changed by another device during a long resolution survive.
+        for (const id of ctx.remoteDeleteIds) delete latest.files[id];
+        for (const id of ctx.remoteUpsertIds) {
+          const entry = ctx.remoteMeta.files[id];
+          if (entry) latest.files[id] = entry;
+        }
+        latest.lastUpdatedAt = new Date().toISOString();
+        ctx.remoteMeta = latest;
+        ctx.metaFileId = await writeRemoteSyncMeta(
+          ctx.accessToken, ctx.rootFolderId, ctx.remoteMeta, ctx.metaFileId
+        );
+        ctx.remoteDirty = false;
+        ctx.remoteUpsertIds.clear();
+        ctx.remoteDeleteIds.clear();
+        lastCheckpointAt = Date.now();
+      };
+
+      try {
+        for (let i = 0; i < items.length; i += CONCURRENCY) {
+          const batch = items.slice(i, i + CONCURRENCY);
+          ctx.accessToken = (await this.getTokens()).accessToken;
+          await Promise.all(batch.map(async (item) => {
+            try {
+              if (item.conflict.isEditDelete) {
+                await this.resolveEditDeleteConflict(ctx, item.fileId, item.vaultPath, choice);
+              } else {
+                await this.resolveNormalConflict(ctx, item.fileId, item.vaultPath, choice);
+              }
+              resolvedIds.add(item.fileId);
+            } catch (err) {
+              failed++;
+              this.lastError = formatError(err);
+              console.warn("[DriveSync] Conflict resolution failed:", item.vaultPath, err);
+            }
+          }));
+          onProgress?.(resolvedIds.size + failed, fileIds.length);
+          // Between batches only, so a half-mutated remoteMeta is never written.
+          await checkpointRemoteMeta();
+        }
+      } finally {
+        // Persist what was applied — and drop the items that were applied —
+        // even if the loop threw partway through.
+        const persisted = await this.flushConflictMeta(ctx, checkpointRemoteMeta);
+        if (persisted) {
+          this.conflicts = this.conflicts.filter(c => !resolvedIds.has(c.fileId));
+        } else {
+          failed += resolvedIds.size;
+          resolvedIds.clear();
+        }
+      }
 
       // If no more conflicts, continue pull while still holding the lock
       if (this.conflicts.length === 0 && this.syncStatus === "conflict") {
@@ -2314,127 +2432,193 @@ export class DriveSyncManager {
       // since JS is single-threaded and we release+reacquire synchronously
       await this.pull();
     }
+    return { resolved: resolvedIds.size, failed };
+  }
+
+  /**
+   * Write the metadata a conflict batch accumulated.
+   *
+   * Never throws: it runs on the error path too, where masking the original
+   * failure would be worse than a logged metadata write failure. Remote is
+   * written first because the local metadata is derived from the in-memory
+   * remote copy; if the remote write fails, readReconciledRemoteMeta re-derives
+   * remote truth from a live Drive listing on the next sync anyway.
+   */
+  private async flushConflictMeta(
+    ctx: ConflictResolveContext,
+    checkpointRemoteMeta: (force?: boolean) => Promise<void>
+  ): Promise<boolean> {
+    let succeeded = true;
+    try {
+      await checkpointRemoteMeta(true);
+    } catch (err) {
+      succeeded = false;
+      this.lastError = formatError(err);
+      console.warn("[DriveSync] Failed to write remote meta after conflict resolution:", err);
+    }
+    try {
+      const vaultStats = await this.statTouchedPaths(ctx.touchedPaths);
+      const updatedLocalMeta = toLocalSyncMeta(
+        this.getObsidianSyncableRemoteMeta(ctx.remoteMeta) ?? ctx.remoteMeta,
+        ctx.localMeta,
+        vaultStats
+      );
+      await writeLocalSyncMeta(this.app, updatedLocalMeta);
+    } catch (err) {
+      succeeded = false;
+      this.lastError = formatError(err);
+      console.warn("[DriveSync] Failed to write local meta after conflict resolution:", err);
+    }
+    return succeeded;
+  }
+
+  /**
+   * Stat only the paths a conflict batch wrote.
+   *
+   * toLocalSyncMeta carries over the cached mtime/size of every untouched file
+   * whose checksum is unchanged, so a full vault walk is unnecessary — and
+   * stamping current on-disk stats onto files this batch never wrote would let
+   * computeVaultChecksums' mtime+size fast path reuse a stale hash and hide a
+   * real local edit.
+   */
+  private async statTouchedPaths(
+    paths: Set<string>
+  ): Promise<Map<string, { mtime: number; size: number }>> {
+    const stats = new Map<string, { mtime: number; size: number }>();
+    const list = [...paths];
+    for (let i = 0; i < list.length; i += CONCURRENCY) {
+      await Promise.all(list.slice(i, i + CONCURRENCY).map(async (path) => {
+        try {
+          const stat = await this.app.vault.adapter.stat(path);
+          if (stat?.type === "file") stats.set(path, { mtime: stat.mtime, size: stat.size });
+        } catch (err) {
+          console.warn(`[DriveSync] stat failed for ${path}:`, err);
+        }
+      }));
+    }
+    return stats;
+  }
+
+  /**
+   * Read a vault file once, returning its content and MD5 (null if absent).
+   * Hashes exactly like computeVaultChecksums, so the checksum is directly
+   * comparable to Drive's md5Checksum.
+   */
+  private async readLocalWithChecksum(vaultPath: string): Promise<
+    | { binary: true; content: ArrayBuffer; checksum: string }
+    | { binary: false; content: string; checksum: string }
+    | null
+  > {
+    if (!(await this.app.vault.adapter.exists(vaultPath))) return null;
+    if (isBinaryExtension(vaultPath)) {
+      const content = await this.app.vault.adapter.readBinary(vaultPath);
+      return { binary: true, content, checksum: md5Hash(new Uint8Array(content)) };
+    }
+    const content = await this.app.vault.adapter.read(vaultPath);
+    return { binary: false, content, checksum: md5HashString(content) };
   }
 
   private async resolveNormalConflict(
-    accessToken: string,
-    rootFolderId: string,
+    ctx: ConflictResolveContext,
     fileId: string,
     vaultPath: string,
-    choice: "local" | "remote",
-    localMeta: LocalDriveSyncMeta,
-    remoteMeta: SyncMeta
+    choice: "local" | "remote"
   ): Promise<void> {
-    const isBinary = isBinaryExtension(vaultPath);
+    // One read serves the identical-content check, the upload and the backup.
+    const local = await this.readLocalWithChecksum(vaultPath);
+    const fileMeta = ctx.remoteMeta.files[fileId];
+    const remoteChecksum = fileMeta?.md5Checksum ?? "";
+
+    // False conflict from stale metadata: the file on disk already matches the
+    // remote content, so either choice is a no-op. Adopt the remote entry
+    // without a backup or a transfer — same shortcut pull() applies to
+    // already-matching remote-only files.
+    if (local && fileMeta && remoteChecksum && local.checksum === remoteChecksum) {
+      ctx.localMeta.pathToId[vaultPath] = fileId;
+      ctx.localMeta.files[fileId] = {
+        md5Checksum: remoteChecksum,
+        modifiedTime: fileMeta.modifiedTime ?? "",
+        name: fileMeta.name,
+      };
+      ctx.touchedPaths.add(vaultPath);
+      return;
+    }
 
     if (choice === "local") {
       // Local wins: upload local content to Drive, backup remote
-      if (await this.app.vault.adapter.exists(vaultPath)) {
+      if (local) {
         // Backup remote content (binary or text)
-        if (isBinary) {
-          const remoteContent = await drive.readFileRaw(accessToken, fileId);
-          await saveConflictBackup(accessToken, rootFolderId, vaultPath, remoteContent);
+        if (local.binary) {
+          const remoteContent = await drive.readFileRaw(ctx.accessToken, fileId);
+          await saveConflictBackup(this.app, vaultPath, remoteContent);
         } else {
-          const remoteContent = await drive.readFile(accessToken, fileId);
-          await saveConflictBackup(accessToken, rootFolderId, vaultPath, remoteContent);
+          const remoteContent = await drive.readFile(ctx.accessToken, fileId);
+          await saveConflictBackup(this.app, vaultPath, remoteContent);
         }
 
         // Upload local content
         const mimeType = getMimeType(vaultPath);
-        let driveFile: drive.DriveFile;
-        if (isBinary) {
-          const content = await this.app.vault.adapter.readBinary(vaultPath);
-          driveFile = await drive.updateFileBinary(accessToken, fileId, content, mimeType);
-        } else {
-          const content = await this.app.vault.adapter.read(vaultPath);
-          driveFile = await drive.updateFile(accessToken, fileId, content, mimeType);
-        }
+        const driveFile = local.binary
+          ? await drive.updateFileBinary(ctx.accessToken, fileId, local.content, mimeType)
+          : await drive.updateFile(ctx.accessToken, fileId, local.content, mimeType);
 
-        upsertFileInMeta(remoteMeta, driveFile, vaultPath);
+        upsertFileInMeta(ctx.remoteMeta, driveFile, vaultPath);
+        ctx.remoteDirty = true;
+        ctx.remoteUpsertIds.add(fileId);
+        ctx.touchedPaths.add(vaultPath);
       }
     } else {
       // Remote wins: download remote content, backup local
-      if (await this.app.vault.adapter.exists(vaultPath)) {
-        if (isBinary) {
-          const localContent = await this.app.vault.adapter.readBinary(vaultPath);
-          await saveConflictBackup(accessToken, rootFolderId, vaultPath, localContent);
-        } else {
-          const localContent = await this.app.vault.adapter.read(vaultPath);
-          await saveConflictBackup(accessToken, rootFolderId, vaultPath, localContent);
-        }
+      if (local) {
+        await saveConflictBackup(this.app, vaultPath, local.content);
       }
 
-      // Download remote content
-      await this.downloadFile(accessToken, rootFolderId, fileId, remoteMeta, localMeta);
+      // Download remote content. remoteMeta is untouched here, so this branch
+      // never needs a remote metadata write.
+      await this.downloadFile(ctx.accessToken, ctx.rootFolderId, fileId, ctx.remoteMeta, ctx.localMeta);
+      ctx.touchedPaths.add(vaultPath);
     }
-
-    // Update remote and local meta
-    await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
-    const vaultStats = new Map<string, { mtime: number; size: number }>();
-    for (const f of await this.getAllVaultFiles()) {
-      vaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
-    }
-    const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, localMeta, vaultStats);
-    await writeLocalSyncMeta(this.app, updatedLocalMeta);
   }
 
   private async resolveEditDeleteConflict(
-    accessToken: string,
-    rootFolderId: string,
+    ctx: ConflictResolveContext,
     fileId: string,
     vaultPath: string,
-    choice: "local" | "remote",
-    localMeta: LocalDriveSyncMeta,
-    remoteMeta: SyncMeta
+    choice: "local" | "remote"
   ): Promise<void> {
+    const local = await this.readLocalWithChecksum(vaultPath);
+
     if (choice === "local") {
       // Keep local file: re-upload to Drive
-      if (await this.app.vault.adapter.exists(vaultPath)) {
+      if (local) {
         const mimeType = getMimeType(vaultPath);
-        const isBinary = isBinaryExtension(vaultPath);
 
         // Drive uses flat structure: file name = vault path
-        let driveFile: drive.DriveFile;
-        if (isBinary) {
-          const content = await this.app.vault.adapter.readBinary(vaultPath);
-          driveFile = await drive.createFileBinary(accessToken, vaultPath, content, rootFolderId, mimeType);
-        } else {
-          const content = await this.app.vault.adapter.read(vaultPath);
-          driveFile = await drive.createFile(accessToken, vaultPath, content, rootFolderId, mimeType);
-        }
+        const driveFile = local.binary
+          ? await drive.createFileBinary(ctx.accessToken, vaultPath, local.content, ctx.rootFolderId, mimeType)
+          : await drive.createFile(ctx.accessToken, vaultPath, local.content, ctx.rootFolderId, mimeType);
 
         // Update mappings with new file ID
-        delete localMeta.pathToId[vaultPath];
-        localMeta.pathToId[vaultPath] = driveFile.id;
-        upsertFileInMeta(remoteMeta, driveFile, vaultPath);
+        ctx.localMeta.pathToId[vaultPath] = driveFile.id;
+        upsertFileInMeta(ctx.remoteMeta, driveFile, vaultPath);
+        ctx.remoteUpsertIds.add(driveFile.id);
+        ctx.touchedPaths.add(vaultPath);
       }
     } else {
       // Accept deletion: remove local file
-      if (await this.app.vault.adapter.exists(vaultPath)) {
+      if (local) {
         // Backup before deleting (binary or text)
-        if (isBinaryExtension(vaultPath)) {
-          const content = await this.app.vault.adapter.readBinary(vaultPath);
-          await saveConflictBackup(accessToken, rootFolderId, vaultPath, content);
-        } else {
-          const content = await this.app.vault.adapter.read(vaultPath);
-          await saveConflictBackup(accessToken, rootFolderId, vaultPath, content);
-        }
+        await saveConflictBackup(this.app, vaultPath, local.content);
       }
       await this.trashByPath(vaultPath);
-      delete localMeta.pathToId[vaultPath];
-      delete localMeta.files[fileId];
+      delete ctx.localMeta.pathToId[vaultPath];
+      delete ctx.localMeta.files[fileId];
     }
 
     // Remove old file ID from remote meta
-    removeFileFromMeta(remoteMeta, fileId);
-
-    await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
-    const vaultStats = new Map<string, { mtime: number; size: number }>();
-    for (const f of await this.getAllVaultFiles()) {
-      vaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
-    }
-    const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, localMeta, vaultStats);
-    await writeLocalSyncMeta(this.app, updatedLocalMeta);
+    removeFileFromMeta(ctx.remoteMeta, fileId);
+    ctx.remoteDeleteIds.add(fileId);
+    ctx.remoteDirty = true;
   }
 
   // ========================================
@@ -2491,18 +2675,31 @@ export class DriveSyncManager {
   }
 
   // ========================================
-  // Conflict Backup Management (sync_conflicts/ folder on Drive)
+  // Conflict Backup Management (local conflict-backups/ folder)
   // ========================================
 
-  async listConflictFiles(): Promise<drive.DriveFile[]> {
-    const tokens = await this.getTokens();
-    const conflictFolderId = await drive.ensureSubFolder(tokens.accessToken, tokens.rootFolderId, "sync_conflicts");
-    return drive.listFiles(tokens.accessToken, conflictFolderId);
+  async listConflictFiles(): Promise<ConflictBackupEntry[]> {
+    const adapter = this.app.vault.adapter;
+    const folder = getConflictBackupFolder();
+    if (!(await adapter.exists(folder))) return [];
+
+    const { files } = await adapter.list(folder);
+    const entries: ConflictBackupEntry[] = [];
+    for (let i = 0; i < files.length; i += CONCURRENCY) {
+      await Promise.all(files.slice(i, i + CONCURRENCY).map(async (path) => {
+        try {
+          const stat = await adapter.stat(path);
+          if (stat?.type !== "file") return;
+          entries.push({ path, name: path.slice(path.lastIndexOf("/") + 1), mtime: stat.mtime });
+        } catch (err) {
+          console.warn(`[DriveSync] stat failed for ${path}:`, err);
+        }
+      }));
+    }
+    return entries.sort((a, b) => b.mtime - a.mtime);
   }
 
-  async restoreConflictFile(fileId: string, restoreName: string): Promise<void> {
-    const tokens = await this.getTokens();
-    const { accessToken } = tokens;
+  async restoreConflictFile(backupPath: string, restoreName: string): Promise<void> {
     const restorePath = restorePathFromConflictBackupName(restoreName);
     const isBinary = isBinaryExtension(restorePath);
 
@@ -2512,14 +2709,14 @@ export class DriveSyncManager {
 
     const existingLocal = this.app.vault.getAbstractFileByPath(restorePath);
     if (isBinary) {
-      const content = await drive.readFileRaw(accessToken, fileId);
+      const content = await this.app.vault.adapter.readBinary(backupPath);
       if (existingLocal instanceof TFile) {
         await this.app.vault.modifyBinary(existingLocal, content);
       } else {
         await this.app.vault.createBinary(restorePath, content);
       }
     } else {
-      const content = await drive.readFile(accessToken, fileId);
+      const content = await this.app.vault.adapter.read(backupPath);
       if (existingLocal instanceof TFile) {
         await this.app.vault.modify(existingLocal, content);
       } else {
@@ -2528,19 +2725,23 @@ export class DriveSyncManager {
     }
   }
 
-  async deleteConflictFiles(fileIds: string[]): Promise<number> {
-    const tokens = await this.getTokens();
+  async deleteConflictFiles(backupPaths: string[]): Promise<number> {
     let deleted = 0;
-    for (const fileId of fileIds) {
+    for (const path of backupPaths) {
       try {
-        await drive.deleteFile(tokens.accessToken, fileId);
+        await this.app.vault.adapter.remove(path);
         deleted++;
       } catch (err) {
         // ignore individual delete failures
-        console.debug("[DriveSync] deleteConflictFiles failed for file:", fileId, err);
+        console.debug("[DriveSync] deleteConflictFiles failed for file:", path, err);
       }
     }
     return deleted;
+  }
+
+  /** Read a local conflict backup for preview. */
+  async readConflictBackup(backupPath: string): Promise<string> {
+    return this.app.vault.adapter.read(backupPath);
   }
 
   // ========================================

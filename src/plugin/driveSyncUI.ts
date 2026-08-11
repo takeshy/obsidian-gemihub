@@ -275,7 +275,7 @@ export class DriveSyncUIManager {
 
   openConflictModal(mgr: DriveSyncManager): void {
     new DriveSyncConflictModal(this.plugin.app, mgr, mgr.conflicts, () => {
-      // After all conflicts resolved, pull() runs automatically inside resolveConflict.
+      // After all conflicts resolved, pull() runs automatically inside resolveConflicts.
       // If pull() detects new conflicts, re-open the modal.
       if (mgr.syncStatus === "conflict") {
         this.openConflictModal(mgr);
