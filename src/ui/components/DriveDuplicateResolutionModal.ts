@@ -53,7 +53,7 @@ export class DriveDuplicateResolutionModal extends Modal {
       radio.checked = this.selected.get(group.path) === file.id;
       radio.addEventListener("change", () => this.selected.set(group.path, file.id));
       const date = file.modifiedTime ? new Date(file.modifiedTime).toLocaleString() : t("common.none");
-      label.createSpan({ text: `${date} · ${file.size ? `${file.size} bytes · ` : ""}${file.id}` });
+      label.createSpan({ text: `${file.name} · ${date} · ${file.size ? `${file.size} bytes · ` : ""}${file.id}` });
     }
     if (!isBinaryExtension(group.path) && group.files.length >= 2) {
       const button = item.createEl("button", { cls: "gemihub-sync-diff-toggle" });

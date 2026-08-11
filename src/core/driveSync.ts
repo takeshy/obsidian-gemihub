@@ -859,15 +859,20 @@ export class DriveSyncManager {
 
     const driveFiles = await drive.listUserFiles(accessToken, rootFolderId);
     const syncableFilesByPath = new Map<string, drive.DriveFile[]>();
+    const caseInsensitivePaths = Platform.isWin || Platform.isMacOS || Platform.isIosApp;
     for (const file of driveFiles) {
       if (this.isExcludedPath(file.name) || isGoogleWorkspaceMimeType(file.mimeType)) continue;
-      const files = syncableFilesByPath.get(file.name) ?? [];
+      // Drive permits case-distinct names, while Windows/macOS vaults usually
+      // resolve them to the same file. Treat those as duplicates too; otherwise
+      // every pull rediscovers the losing case variant as a remote-only file.
+      const normalizedPath = caseInsensitivePaths ? file.name.toLowerCase() : file.name;
+      const files = syncableFilesByPath.get(normalizedPath) ?? [];
       files.push(file);
-      syncableFilesByPath.set(file.name, files);
+      syncableFilesByPath.set(normalizedPath, files);
     }
     const duplicateGroups = [...syncableFilesByPath]
       .filter(([, files]) => files.length > 1)
-      .map(([path, files]) => ({ path, files }))
+      .map(([, files]) => ({ path: files[0].name, files }))
       .sort((a, b) => a.path.localeCompare(b.path));
     if (duplicateGroups.length > 0) {
       throw new DuplicateRemoteFilesError(duplicateGroups);
@@ -933,9 +938,14 @@ export class DriveSyncManager {
     const files = await drive.listUserFiles(accessToken, rootFolderId);
     const trashFolderId = await drive.ensureSubFolder(accessToken, rootFolderId, "trash");
     const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
+    const caseInsensitivePaths = Platform.isWin || Platform.isMacOS || Platform.isIosApp;
+    const matchesPath = (candidate: string, expected: string) =>
+      caseInsensitivePaths ? candidate.toLowerCase() === expected.toLowerCase() : candidate === expected;
 
     for (const [path, winnerId] of winners) {
-      const duplicates = files.filter(file => file.name === path && !this.isExcludedPath(file.name));
+      const duplicates = files.filter(file =>
+        matchesPath(file.name, path) && !this.isExcludedPath(file.name)
+      );
       if (duplicates.length < 2 || !duplicates.some(file => file.id === winnerId)) {
         throw new Error(`Duplicate files changed while resolving: ${path}`);
       }
