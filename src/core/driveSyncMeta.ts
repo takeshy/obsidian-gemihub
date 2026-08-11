@@ -279,9 +279,11 @@ export function restoreOriginalPathFromConflictBackupName(name: string): string 
  * Convert remote SyncMeta to local format (for syncing after push/pull).
  *
  * `preserveIds` lists files the caller deliberately left untouched on disk
- * (pull "Ignore"). Adopting the remote name/checksum for those would point the
- * local metadata at a path the file does not occupy, so their previous local
- * entry and path mapping are carried over verbatim instead.
+ * (pull "Ignore", or a remote deletion that has not been applied to the vault
+ * yet). Adopting the remote state for those would point the local metadata at
+ * a path the file does not occupy — or drop the tracking entry entirely for
+ * ids absent from remoteMeta — so their previous local entry and path mapping
+ * are carried over verbatim instead.
  */
 export function toLocalSyncMeta(
   remoteMeta: SyncMeta,
@@ -354,8 +356,22 @@ export function toLocalSyncMeta(
   // Remove stale pathToId entries for files no longer in remoteMeta
   const remoteFileIds = new Set(Object.keys(remoteMeta.files));
   for (const [path, id] of Object.entries(pathToId)) {
-    if (!remoteFileIds.has(id)) {
+    if (!remoteFileIds.has(id) && !preserveIds?.has(id)) {
       delete pathToId[path];
+    }
+  }
+
+  // Preserved ids absent from remoteMeta keep their files entry too, but only
+  // while their path mapping still points at them (a remote file adopting the
+  // same path in the loop above takes precedence).
+  if (preserveIds) {
+    for (const id of preserveIds) {
+      if (remoteFileIds.has(id)) continue;
+      const path = idToExistingPath.get(id);
+      const entry = existingLocal?.files[id];
+      if (path && entry && pathToId[path] === id) {
+        files[id] = { ...entry };
+      }
     }
   }
 

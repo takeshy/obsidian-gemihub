@@ -2458,10 +2458,22 @@ export class DriveSyncManager {
     }
     try {
       const vaultStats = await this.statTouchedPaths(ctx.touchedPaths);
+      // Files still tracked locally but absent from remote meta are remote
+      // deletions the interrupted pull has not applied yet (it surfaced this
+      // batch's conflicts and returned before deleting anything). Rebuilding
+      // local meta from remote would silently drop their tracking entries
+      // while the files stay on disk, so the follow-up pull could never
+      // delete them and the next push would re-upload them as new files.
+      // Preserve those entries verbatim instead.
+      const remoteIds = new Set(Object.keys(ctx.remoteMeta.files));
+      const pendingRemoteDeletionIds = new Set(
+        Object.values(ctx.localMeta.pathToId).filter((id) => !remoteIds.has(id))
+      );
       const updatedLocalMeta = toLocalSyncMeta(
         this.getObsidianSyncableRemoteMeta(ctx.remoteMeta) ?? ctx.remoteMeta,
         ctx.localMeta,
-        vaultStats
+        vaultStats,
+        pendingRemoteDeletionIds
       );
       await writeLocalSyncMeta(this.app, updatedLocalMeta);
     } catch (err) {

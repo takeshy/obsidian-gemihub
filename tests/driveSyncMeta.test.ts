@@ -175,6 +175,44 @@ describe("toLocalSyncMeta", () => {
 
     expect(result.pathToId).toEqual({ "kept.md": "kept" });
   });
+
+  it("keeps preserved entries that are absent from the remote (pending remote deletion)", () => {
+    const existing: LocalDriveSyncMeta = {
+      lastUpdatedAt: "",
+      files: {
+        kept: { md5Checksum: "a", modifiedTime: "t", name: "kept.md" },
+        "deleted-id": { md5Checksum: "b", modifiedTime: "t", name: "gone.md", localMtime: 7, localSize: 8 },
+      },
+      pathToId: { "kept.md": "kept", "gone.md": "deleted-id" },
+    };
+    const result = toLocalSyncMeta(
+      remote({ kept: { name: "kept.md", mimeType: "text/markdown", md5Checksum: "a", modifiedTime: "t" } }),
+      existing,
+      new Map(),
+      new Set(["deleted-id"])
+    );
+
+    // The tracking entry survives verbatim so a later pull can still see the
+    // file as remotely deleted and remove it from disk.
+    expect(result.pathToId["gone.md"]).toBe("deleted-id");
+    expect(result.files["deleted-id"]).toEqual(existing.files["deleted-id"]);
+  });
+
+  it("lets a remote file that adopted the path win over a preserved absent id", () => {
+    const result = toLocalSyncMeta(
+      remote({ "new-id": { name: "gone.md", mimeType: "text/markdown", md5Checksum: "c", modifiedTime: "t" } }),
+      {
+        lastUpdatedAt: "",
+        files: { "deleted-id": { md5Checksum: "b", modifiedTime: "t", name: "gone.md" } },
+        pathToId: { "gone.md": "deleted-id" },
+      },
+      new Map(),
+      new Set(["deleted-id"])
+    );
+
+    expect(result.pathToId["gone.md"]).toBe("new-id");
+    expect(result.files["deleted-id"]).toBeUndefined();
+  });
 });
 
 describe("remote meta mutation helpers", () => {

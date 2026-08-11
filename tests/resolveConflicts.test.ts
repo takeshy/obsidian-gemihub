@@ -355,6 +355,43 @@ describe("resolveConflicts — edit/delete conflicts", () => {
   });
 });
 
+describe("resolveConflicts — pending remote deletions", () => {
+  // pull() surfaces conflicts and returns before applying any remote
+  // deletions. Resolving the conflicts must not orphan those files: their
+  // local metadata has to survive so the follow-up pull can still see them
+  // as remotely deleted and remove them from disk. Dropping the entries
+  // leaves the file on disk untracked — never deleted, and re-uploaded to
+  // Drive as a brand-new file on the next push.
+  it("keeps a remotely deleted file tracked so the follow-up pull can delete it", async () => {
+    const { manager, vault } = setup(manyFiles(2));
+
+    // notes/removed.md was deleted on remote: still on disk and tracked in
+    // local meta, but absent from the remote metadata document.
+    const localMeta = readLocalMeta(vault);
+    vault.setFile("notes/removed.md", "doomed content");
+    localMeta.pathToId["notes/removed.md"] = "removed-id";
+    localMeta.files["removed-id"] = {
+      md5Checksum: md5HashString("doomed content"),
+      modifiedTime: "2026-07-01T00:00:00.000Z",
+      name: "notes/removed.md",
+    };
+    vault.setFile(getLocalMetaPath(), JSON.stringify(localMeta));
+
+    const result = await manager.resolveConflicts(
+      manager.conflicts.map((c) => c.fileId),
+      "remote"
+    );
+    expect(result).toEqual({ resolved: 2, failed: 0 });
+
+    // Applying the deletion is pull's job; resolution must leave it visible.
+    const meta = readLocalMeta(vault);
+    expect(meta.pathToId["notes/removed.md"]).toBe("removed-id");
+    expect(meta.files["removed-id"]).toBeDefined();
+    expect(vault.has("notes/removed.md")).toBe(true);
+    expect(manager.pull).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("resolveConflicts — failure handling", () => {
   it("keeps conflicts unresolved when metadata persistence fails", async () => {
     const { manager, state } = setup(manyFiles(2));
