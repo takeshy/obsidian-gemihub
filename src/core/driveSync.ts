@@ -1188,10 +1188,10 @@ export class DriveSyncManager {
         const fileId = syncLocalMeta.pathToId[oldPath] || oldPath;
         files.push({ id: fileId, name: newPath, type: "renamed", oldName: oldPath });
       }
-      for (const id of diff.editDeleteConflicts) {
-        const name = idToPath[id] || id;
-        files.push({ id, name, type: "editDeleted" });
-      }
+      // Remote deletions, including edit/delete conflicts, are resolved from
+      // the pull preview. Do not count them as push targets: push is blocked by
+      // hasRemoteChanges below until the user accepts the delete or restores
+      // the local version through conflict resolution.
       // Show locally deleted files (will be moved to trash/ on Drive)
       // Both localOnly (in localMeta only) and deletedIds (in both metas but deleted from disk)
       // Verify with adapter.exists to avoid false positives from Obsidian index lag
