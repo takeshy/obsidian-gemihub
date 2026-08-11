@@ -11,6 +11,7 @@ import { DriveSyncUIManager } from "src/plugin/driveSyncUI";
 import { SettingsTab } from "src/ui/SettingsTab";
 import { t } from "src/i18n";
 import { formatError } from "src/utils/error";
+import { ConfirmModal } from "src/ui/components/ConfirmModal";
 
 const WORKSPACE_STATE_FILENAME = "gemini-workspace.json";
 
@@ -112,7 +113,7 @@ export class GemiHubPlugin extends Plugin {
       name: t("driveSync.commandPush"),
       callback: () => {
         const mgr = this.driveSyncManager;
-        if (!mgr?.isUnlocked) {
+        if (!mgr?.isConfigured || !mgr.isUnlocked) {
           void this.promptDriveSyncUnlock();
           return;
         }
@@ -125,7 +126,7 @@ export class GemiHubPlugin extends Plugin {
       name: t("driveSync.commandPull"),
       callback: () => {
         const mgr = this.driveSyncManager;
-        if (!mgr?.isUnlocked) {
+        if (!mgr?.isConfigured || !mgr.isUnlocked) {
           void this.promptDriveSyncUnlock();
           return;
         }
@@ -138,12 +139,19 @@ export class GemiHubPlugin extends Plugin {
       name: t("driveSync.commandFullPush"),
       callback: () => {
         const mgr = this.driveSyncManager;
-        if (!mgr?.isUnlocked) {
+        if (!mgr?.isConfigured || !mgr.isUnlocked) {
           new Notice(t("driveSync.notUnlocked"));
           return;
         }
         void (async () => {
           try {
+            const confirmed = await new ConfirmModal(
+              this.app,
+              t("driveSync.fullPushConfirm"),
+              t("driveSync.fullPush"),
+              t("common.cancel")
+            ).openAndWait();
+            if (!confirmed) return;
             await mgr.fullPush();
           } catch (err) {
             new Notice(t("driveSync.pushFailed", { error: formatError(err) }));
@@ -157,12 +165,19 @@ export class GemiHubPlugin extends Plugin {
       name: t("driveSync.commandFullPull"),
       callback: () => {
         const mgr = this.driveSyncManager;
-        if (!mgr?.isUnlocked) {
+        if (!mgr?.isConfigured || !mgr.isUnlocked) {
           new Notice(t("driveSync.notUnlocked"));
           return;
         }
         void (async () => {
           try {
+            const confirmed = await new ConfirmModal(
+              this.app,
+              t("driveSync.fullPullConfirm"),
+              t("driveSync.fullPull"),
+              t("common.cancel")
+            ).openAndWait();
+            if (!confirmed) return;
             await mgr.fullPull();
           } catch (err) {
             new Notice(t("driveSync.pullFailed", { error: formatError(err) }));
