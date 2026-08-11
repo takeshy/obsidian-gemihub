@@ -105,29 +105,35 @@ export async function readRemoteSyncMeta(
   }
 }
 
+/**
+ * Write remote sync meta, returning the Drive file ID that was written.
+ *
+ * Callers that write repeatedly (push checkpoints) should pass the previously
+ * returned ID as `knownFileId` to skip the name lookup on every write.
+ */
 export async function writeRemoteSyncMeta(
   accessToken: string,
   rootFolderId: string,
-  meta: SyncMeta
-): Promise<void> {
-  const metaFile = await findFileByExactName(
-    accessToken,
-    SYNC_META_FILE_NAME,
-    rootFolderId
-  );
+  meta: SyncMeta,
+  knownFileId?: string | null
+): Promise<string> {
+  const metaFileId = knownFileId
+    ?? (await findFileByExactName(accessToken, SYNC_META_FILE_NAME, rootFolderId))?.id
+    ?? null;
   const content = JSON.stringify(meta, null, 2);
 
-  if (metaFile) {
-    await updateFile(accessToken, metaFile.id, content, "application/json");
-  } else {
-    await createFile(
-      accessToken,
-      SYNC_META_FILE_NAME,
-      content,
-      rootFolderId,
-      "application/json"
-    );
+  if (metaFileId) {
+    await updateFile(accessToken, metaFileId, content, "application/json");
+    return metaFileId;
   }
+  const created = await createFile(
+    accessToken,
+    SYNC_META_FILE_NAME,
+    content,
+    rootFolderId,
+    "application/json"
+  );
+  return created.id;
 }
 
 /**
@@ -239,11 +245,17 @@ export function restoreOriginalPathFromConflictBackupName(name: string): string 
 
 /**
  * Convert remote SyncMeta to local format (for syncing after push/pull).
+ *
+ * `preserveIds` lists files the caller deliberately left untouched on disk
+ * (pull "Ignore"). Adopting the remote name/checksum for those would point the
+ * local metadata at a path the file does not occupy, so their previous local
+ * entry and path mapping are carried over verbatim instead.
  */
 export function toLocalSyncMeta(
   remoteMeta: SyncMeta,
   existingLocal: LocalDriveSyncMeta | null,
-  vaultStats?: Map<string, { mtime: number; size: number }>
+  vaultStats?: Map<string, { mtime: number; size: number }>,
+  preserveIds?: Set<string>
 ): LocalDriveSyncMeta {
   const files: LocalDriveSyncMeta["files"] = {};
   const pathToId: Record<string, string> = existingLocal?.pathToId
@@ -263,6 +275,13 @@ export function toLocalSyncMeta(
   }
 
   for (const [id, f] of Object.entries(remoteMeta.files)) {
+    const preservedPath = preserveIds?.has(id) ? idToExistingPath.get(id) : undefined;
+    const preservedEntry = preservedPath ? existingLocal?.files[id] : undefined;
+    if (preservedPath && preservedEntry) {
+      files[id] = { ...preservedEntry };
+      pathToId[preservedPath] = id;
+      continue;
+    }
     // Always prefer name (Drive API name = vault path, always up-to-date).
     // path is an Obsidian extension that can become stale after remote renames
     // (rebuildSyncMeta copies prev.path without updating it).
@@ -275,7 +294,12 @@ export function toLocalSyncMeta(
     if (existingPath) {
       if (existingPath.toLowerCase() === remotePath.toLowerCase()) {
         resolvedPath = existingPath;
-      } else {
+      } else if (pathToId[existingPath] === id) {
+        // Only drop the old mapping while it still belongs to this file. When
+        // two files swap paths remotely (a.md -> b.md and b.md -> a.md), an
+        // earlier iteration has already claimed this key, and deleting it here
+        // would leave that file untracked — so the next push would re-upload it
+        // to Drive as a duplicate.
         delete pathToId[existingPath];
       }
     }

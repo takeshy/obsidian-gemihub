@@ -15,8 +15,27 @@ import { ConfirmModal } from "src/ui/components/ConfirmModal";
 
 const WORKSPACE_STATE_FILENAME = "gemini-workspace.json";
 
+/**
+ * Deep copy of the defaults, so nothing can write through to the shared
+ * constant. Spelled out rather than using structuredClone(), which is missing
+ * on iOS below 15.4 — still inside Obsidian's supported range.
+ */
+function cloneDefaultSettings(): GemiHubSettings {
+  return {
+    ...DEFAULT_SETTINGS,
+    driveSync: {
+      ...DEFAULT_SETTINGS.driveSync,
+      excludePatterns: [...DEFAULT_SETTINGS.driveSync.excludePatterns],
+    },
+    editHistory: {
+      ...DEFAULT_SETTINGS.editHistory,
+      diff: { ...DEFAULT_SETTINGS.editHistory.diff },
+    },
+  };
+}
+
 export class GemiHubPlugin extends Plugin {
-  settings: GemiHubSettings = DEFAULT_SETTINGS;
+  settings: GemiHubSettings = cloneDefaultSettings();
   workspaceState: WorkspaceState = { ...DEFAULT_WORKSPACE_STATE };
   driveSyncManager: DriveSyncManager | null = null;
   driveSyncUI!: DriveSyncUIManager;
@@ -49,8 +68,18 @@ export class GemiHubPlugin extends Plugin {
   // ---- Settings persistence ----
 
   async loadSettings(): Promise<void> {
-    const data = await this.loadData();
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+    const data = (await this.loadData()) as Partial<GemiHubSettings> | null;
+    const defaults = cloneDefaultSettings();
+    this.settings = {
+      ...defaults,
+      ...data,
+      driveSync: { ...defaults.driveSync, ...data?.driveSync },
+      editHistory: {
+        ...defaults.editHistory,
+        ...data?.editHistory,
+        diff: { ...defaults.editHistory.diff, ...data?.editHistory?.diff },
+      },
+    };
   }
 
   async saveSettings(): Promise<void> {
