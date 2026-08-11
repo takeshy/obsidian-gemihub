@@ -2,7 +2,7 @@
 // Manages push/pull sync between Obsidian Vault and Google Drive.
 // Adapted from GemiHub's useSync.ts hook — restructured as a class.
 
-import { App, TFile, Notice, type EventRef } from "obsidian";
+import { App, TFile, Notice, Platform, type EventRef } from "obsidian";
 import { t } from "src/i18n";
 import type { GemiHubPlugin } from "src/plugin";
 import { type DriveSyncSettings, type DriveSessionTokens, WORKSPACE_FOLDER } from "src/types";
@@ -577,7 +577,12 @@ export class DriveSyncManager {
           // Skip MD5 if mtime+size unchanged from cached values
           const cached = cachedByPath.get(file.path)
             ?? cachedByPathLower.get(file.path.toLowerCase());
-          if (cached?.localMtime === mtime && cached?.localSize === size && cached.md5Checksum) {
+          // Mobile adapters can retain the same mtime for rapid edits, and an
+          // edit can also preserve the byte length. Reusing the cached hash in
+          // that case makes real changes (notably .desktop/.workflow edits)
+          // disappear from the push list. Desktop filesystems provide reliable
+          // enough stat changes for this optimization; mobile always re-hashes.
+          if (!Platform.isMobile && cached?.localMtime === mtime && cached?.localSize === size && cached.md5Checksum) {
             checksums.set(file.path, cached.md5Checksum);
             return;
           }

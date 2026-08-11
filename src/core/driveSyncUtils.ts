@@ -104,6 +104,8 @@ const MIME_TYPE_MAP: Record<string, string> = {
   js: "application/javascript",
   ts: "application/typescript",
   json: "application/json",
+  desktop: "application/json",
+  workflow: "application/yaml",
   canvas: "application/json",
   base: "application/json",
   xml: "application/xml",
