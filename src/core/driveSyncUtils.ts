@@ -163,7 +163,10 @@ export function isBinaryExtension(filePath: string): boolean {
   const dotIndex = name.lastIndexOf(".");
   if (dotIndex <= 0) return false; // extensionless files are text
   const ext = name.substring(dotIndex + 1);
-  return BINARY_EXTENSIONS.has(ext);
+  // Unknown extensions resolve to application/octet-stream in getMimeType().
+  // Treat those as binary by default: decoding arbitrary bytes as UTF-8 and
+  // writing them back as text can irreversibly corrupt the file.
+  return BINARY_EXTENSIONS.has(ext) || isBinaryMimeType(getMimeType(filePath));
 }
 
 // ========================================

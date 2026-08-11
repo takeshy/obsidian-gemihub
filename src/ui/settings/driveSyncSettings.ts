@@ -25,6 +25,7 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
         void (async () => {
           plugin.settings.driveSync.enabled = value;
           await plugin.saveSettings();
+          if (!value) syncManager?.lock();
           plugin.setupDriveSyncUI();
           display();
         })();
@@ -96,7 +97,7 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
               if (!confirmed) return;
               plugin.settings.driveSync.encryptedAuth = null;
               await plugin.saveSettings();
-              syncManager?.stopAutoSync();
+              syncManager?.lock();
               display();
               new Notice(t("driveSync.authReset"));
             })();
@@ -138,6 +139,7 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
               if (!confirmed) return;
               plugin.settings.driveSync.encryptedAuth = null;
               await plugin.saveSettings();
+              syncManager?.lock();
               display();
               new Notice(t("driveSync.authReset"));
             })();

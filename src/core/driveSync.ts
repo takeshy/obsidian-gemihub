@@ -319,6 +319,21 @@ export class DriveSyncManager {
     }
   }
 
+  /**
+   * End the unlocked session without removing persisted configuration.
+   * Used when sync is disabled or the saved authentication is reset.
+   */
+  lock(): void {
+    this.stopAutoSync();
+    this.stopVaultWatcher();
+    this.sessionTokens = null;
+    this.localModifiedCount = 0;
+    this.remoteModifiedCount = 0;
+    this.conflicts = [];
+    this.lastError = null;
+    this.syncStatus = "idle";
+  }
+
   // ========================================
   // Token management
   // ========================================
@@ -1825,7 +1840,7 @@ export class DriveSyncManager {
       const { accessToken, rootFolderId } = tokens;
 
       // Get remote meta (or rebuild)
-      const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
+      const remoteMeta = await this.readReconciledRemoteMeta(accessToken, rootFolderId);
       const syncRemoteMeta = this.getObsidianSyncableRemoteMeta(remoteMeta);
       if (!syncRemoteMeta) {
         new Notice("Drive sync: no remote data found");
@@ -1925,6 +1940,10 @@ export class DriveSyncManager {
 
       const existingRemoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
       const existingRemoteFiles = await drive.listUserFiles(accessToken, rootFolderId);
+      // Only reuse IDs that currently belong to the sync root. An ID cached in
+      // local metadata may now refer to a trashed or externally moved file;
+      // updating such a file succeeds in Drive but does not restore it here.
+      const reusableRemoteIds = new Set(existingRemoteFiles.map((file) => file.id));
 
       // Build fresh remote meta (full push = local is authoritative for
       // Obsidian-syncable files, but preserves Google Workspace files for GemiHub).
@@ -1970,7 +1989,8 @@ export class DriveSyncManager {
       for (let i = 0; i < allPaths.length; i += CONCURRENCY) {
         const batch = allPaths.slice(i, i + CONCURRENCY);
         await Promise.all(batch.map(async (path) => {
-          const existingId = oldLocalMeta.pathToId[path];
+          const cachedId = oldLocalMeta.pathToId[path];
+          const existingId = cachedId && reusableRemoteIds.has(cachedId) ? cachedId : undefined;
           await this.uploadFile(accessToken, rootFolderId, path, existingId, remoteMeta, newLocalMeta, checksums);
           uploadedCount++;
         }));
@@ -2650,10 +2670,6 @@ export class DriveSyncManager {
   }
 
   destroy(): void {
-    this.stopAutoSync();
-    this.stopVaultWatcher();
-    this.sessionTokens = null;
-    this.conflicts = [];
-    this.lastError = null;
+    this.lock();
   }
 }
