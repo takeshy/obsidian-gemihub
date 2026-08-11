@@ -112,6 +112,18 @@ export interface SyncFileListResult {
   hasRemoteChanges: boolean;  // true when remote has unpulled changes
 }
 
+export interface DuplicateRemoteFileGroup {
+  path: string;
+  files: drive.DriveFile[];
+}
+
+export class DuplicateRemoteFilesError extends Error {
+  constructor(public readonly groups: DuplicateRemoteFileGroup[]) {
+    super(`Google Drive contains duplicate file paths: ${groups.map(group => group.path).join(", ")}`);
+    this.name = "DuplicateRemoteFilesError";
+  }
+}
+
 interface CatchAllDeletePlan {
   fileId: string;
   path: string;
@@ -841,17 +853,19 @@ export class DriveSyncManager {
     if (!remoteMeta) return null;
 
     const driveFiles = await drive.listUserFiles(accessToken, rootFolderId);
-    const syncablePathCounts = new Map<string, number>();
+    const syncableFilesByPath = new Map<string, drive.DriveFile[]>();
     for (const file of driveFiles) {
       if (this.isExcludedPath(file.name) || isGoogleWorkspaceMimeType(file.mimeType)) continue;
-      syncablePathCounts.set(file.name, (syncablePathCounts.get(file.name) ?? 0) + 1);
+      const files = syncableFilesByPath.get(file.name) ?? [];
+      files.push(file);
+      syncableFilesByPath.set(file.name, files);
     }
-    const duplicatePaths = [...syncablePathCounts]
-      .filter(([, count]) => count > 1)
-      .map(([path]) => path)
-      .sort((a, b) => a.localeCompare(b));
-    if (duplicatePaths.length > 0) {
-      throw new Error(`Google Drive contains duplicate file paths: ${duplicatePaths.join(", ")}`);
+    const duplicateGroups = [...syncableFilesByPath]
+      .filter(([, files]) => files.length > 1)
+      .map(([path, files]) => ({ path, files }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    if (duplicateGroups.length > 0) {
+      throw new DuplicateRemoteFilesError(duplicateGroups);
     }
     const driveFileIds = new Set(driveFiles.map(f => f.id));
     const staleIds = Object.keys(remoteMeta.files).filter(id => !driveFileIds.has(id));
@@ -905,6 +919,31 @@ export class DriveSyncManager {
       await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
     }
     return remoteMeta;
+  }
+
+  /** Keep one Drive file for each duplicate path and move the others to trash/. */
+  async resolveRemoteDuplicates(winners: ReadonlyMap<string, string>): Promise<void> {
+    const tokens = await this.getTokens();
+    const { accessToken, rootFolderId } = tokens;
+    const files = await drive.listUserFiles(accessToken, rootFolderId);
+    const trashFolderId = await drive.ensureSubFolder(accessToken, rootFolderId, "trash");
+    const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
+
+    for (const [path, winnerId] of winners) {
+      const duplicates = files.filter(file => file.name === path && !this.isExcludedPath(file.name));
+      if (duplicates.length < 2 || !duplicates.some(file => file.id === winnerId)) {
+        throw new Error(`Duplicate files changed while resolving: ${path}`);
+      }
+      for (const file of duplicates) {
+        if (file.id === winnerId) continue;
+        await drive.moveFile(accessToken, file.id, trashFolderId, rootFolderId);
+        if (remoteMeta) delete remoteMeta.files[file.id];
+      }
+    }
+    if (remoteMeta) {
+      remoteMeta.lastUpdatedAt = new Date().toISOString();
+      await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
+    }
   }
 
   // ========================================

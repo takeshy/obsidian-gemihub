@@ -203,6 +203,21 @@
   overflow: hidden;
 }
 
+.gemihub-duplicate-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.gemihub-duplicate-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+}
+
 .gemihub-sync-diff-panel .gemihub-diff-view {
   overflow-x: auto;
   max-width: 100%;

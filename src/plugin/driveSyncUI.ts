@@ -1,8 +1,9 @@
 import { Notice, Menu } from "obsidian";
-import type { DriveSyncManager } from "src/core/driveSync";
+import { DuplicateRemoteFilesError, type DriveSyncManager } from "src/core/driveSync";
 import { DriveSyncConflictModal } from "src/ui/components/DriveSyncConflictModal";
 import { DriveSyncDiffModal } from "src/ui/components/DriveSyncDiffModal";
 import { DriveAuthPasswordModal } from "src/ui/components/DriveAuthPasswordModal";
+import { DriveDuplicateResolutionModal } from "src/ui/components/DriveDuplicateResolutionModal";
 import { formatError } from "src/utils/error";
 import { t } from "src/i18n";
 import type { GemiHubPlugin } from "src/plugin";
@@ -262,6 +263,11 @@ export class DriveSyncUIManager {
       }
     } catch (err) {
       loadingNotice.hide();
+      if (err instanceof DuplicateRemoteFilesError) {
+        const resolved = await new DriveDuplicateResolutionModal(this.plugin.app, err.groups, mgr).openAndWait();
+        if (resolved) await this.showSyncDiffAndExecute(mgr, direction);
+        return;
+      }
       const key = direction === "push" ? "driveSync.pushFailed" as const : "driveSync.pullFailed" as const;
       new Notice(t(key, { error: formatError(err) }));
     }
