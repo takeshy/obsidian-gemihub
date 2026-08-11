@@ -98,6 +98,13 @@ export interface SyncFileListItem {
   name: string;  // Display name (vault path)
   type: "new" | "modified" | "deleted" | "editDeleted" | "renamed" | "conflict";
   oldName?: string; // Previous path (for renames)
+  /**
+   * Whether pull can skip this entry. Only set for rows pull() actually honours
+   * (remote-modified files and blocked remote renames) — content conflicts are
+   * routed through the conflict modal instead, so offering "Ignore" there would
+   * be a button that silently does nothing.
+   */
+  ignorable?: boolean;
 }
 
 export interface SyncFileListResult {
@@ -138,6 +145,9 @@ function isValidVaultPath(path: string): boolean {
 
 const CONCURRENCY = 5;
 
+/** Minimum spacing between remote-metadata checkpoints during a long push. */
+const PUSH_CHECKPOINT_INTERVAL_MS = 15_000;
+
 function remoteSnapshotChanged(
   expected: SyncMeta | null,
   currentFiles: drive.DriveFile[],
@@ -168,7 +178,7 @@ export class DriveSyncManager {
   private app: App;
   private plugin: GemiHubPlugin;
   private syncLock = false;
-  private refreshCountsLock = false;
+  private refreshCountsPromise: Promise<void> | null = null;
   private autoSyncInterval: ReturnType<typeof setInterval> | null = null;
   private vaultEventRefs: EventRef[] = [];
   private vaultChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -813,10 +823,15 @@ export class DriveSyncManager {
   // ========================================
 
   /**
-   * Read remote sync meta and reconcile with actual Drive file listing.
-   * Files deleted externally (GemiHub web, Drive UI, another device) may still
-   * be listed in _sync-meta.json; remove stale entries so pull can detect them.
-   * Writes corrected meta back to Drive if stale entries are found.
+   * Read remote sync meta and reconcile with actual Drive file listing in both
+   * directions.
+   * - Files deleted externally (GemiHub web, Drive UI, another device) may still
+   *   be listed in _sync-meta.json; remove stale entries so pull can detect them.
+   * - Files added to the sync root without a metadata entry (external upload, or
+   *   a push interrupted between the upload and the metadata write) are adopted.
+   *   Without this they stay invisible to pull while still showing up in the
+   *   Drive listing, which permanently blocks push's pre-flight snapshot check.
+   * Writes corrected meta back to Drive if either side needed a change.
    */
   private async readReconciledRemoteMeta(
     accessToken: string,
@@ -826,6 +841,18 @@ export class DriveSyncManager {
     if (!remoteMeta) return null;
 
     const driveFiles = await drive.listUserFiles(accessToken, rootFolderId);
+    const syncablePathCounts = new Map<string, number>();
+    for (const file of driveFiles) {
+      if (this.isExcludedPath(file.name) || isGoogleWorkspaceMimeType(file.mimeType)) continue;
+      syncablePathCounts.set(file.name, (syncablePathCounts.get(file.name) ?? 0) + 1);
+    }
+    const duplicatePaths = [...syncablePathCounts]
+      .filter(([, count]) => count > 1)
+      .map(([path]) => path)
+      .sort((a, b) => a.localeCompare(b));
+    if (duplicatePaths.length > 0) {
+      throw new Error(`Google Drive contains duplicate file paths: ${duplicatePaths.join(", ")}`);
+    }
     const driveFileIds = new Set(driveFiles.map(f => f.id));
     const staleIds = Object.keys(remoteMeta.files).filter(id => !driveFileIds.has(id));
     const confirmedDeletedOrMovedIds: string[] = [];
@@ -853,7 +880,24 @@ export class DriveSyncManager {
       }
     }
 
-    if (confirmedDeletedOrMovedIds.length > 0) {
+    // Adopt untracked Drive files so they surface as ordinary remote additions.
+    // Excluded names are skipped: they are owned by another tool and must not
+    // become pull candidates.
+    const adoptedIds: string[] = [];
+    for (const file of driveFiles) {
+      if (remoteMeta.files[file.id]) continue;
+      if (this.isExcludedPath(file.name)) continue;
+      remoteMeta.files[file.id] = {
+        name: file.name,
+        mimeType: file.mimeType,
+        md5Checksum: file.md5Checksum ?? "",
+        modifiedTime: file.modifiedTime ?? "",
+        createdTime: file.createdTime,
+      };
+      adoptedIds.push(file.id);
+    }
+
+    if (confirmedDeletedOrMovedIds.length > 0 || adoptedIds.length > 0) {
       for (const id of confirmedDeletedOrMovedIds) {
         delete remoteMeta.files[id];
       }
@@ -867,8 +911,26 @@ export class DriveSyncManager {
   // Sync count refresh
   // ========================================
 
+  /**
+   * Wait for an in-flight background count refresh to finish.
+   *
+   * refreshSyncCounts() reconciles (and therefore may rewrite) _sync-meta.json,
+   * so a sync that starts while one is still running could lose that write.
+   * Sync entry points await this after taking the sync lock, which also stops
+   * any further refresh from starting.
+   */
+  private async waitForRefreshCounts(): Promise<void> {
+    const pending = this.refreshCountsPromise;
+    if (!pending) return;
+    try {
+      await pending;
+    } catch {
+      // Refresh failures are non-fatal for the sync that is about to run.
+    }
+  }
+
   async refreshSyncCounts(): Promise<void> {
-    if (this.syncLock || this.refreshCountsLock) return;
+    if (this.syncLock || this.refreshCountsPromise) return;
     if (!this.settings.enabled || !this.sessionTokens) {
       this.localModifiedCount = 0;
       this.remoteModifiedCount = 0;
@@ -876,7 +938,17 @@ export class DriveSyncManager {
       return;
     }
 
-    this.refreshCountsLock = true;
+    const run = this.runRefreshSyncCounts();
+    this.refreshCountsPromise = run;
+    try {
+      await run;
+    } finally {
+      this.refreshCountsPromise = null;
+      this.onStatusChange?.();
+    }
+  }
+
+  private async runRefreshSyncCounts(): Promise<void> {
     try {
       const tokens = await this.getTokens();
       const localMeta = await readLocalSyncMeta(this.app);
@@ -951,9 +1023,6 @@ export class DriveSyncManager {
     } catch (err) {
       // Background refresh failure is expected (e.g. offline); silently ignored.
       console.debug("[DriveSync] refreshSyncCounts failed:", err);
-    } finally {
-      this.refreshCountsLock = false;
-      this.onStatusChange?.();
     }
   }
 
@@ -1112,7 +1181,7 @@ export class DriveSyncManager {
       }
       for (const id of diff.toPull) {
         const name = idToPath[id] || remoteFiles[id]?.name || id;
-        files.push({ id, name, type: "modified" });
+        files.push({ id, name, type: "modified", ignorable: true });
       }
       for (const id of diff.localOnly) {
         if (!(id in syncLocalMeta.files)) continue;
@@ -1138,7 +1207,7 @@ export class DriveSyncManager {
         files.push({ id: item.fileId, name: item.newPath, type: "renamed", oldName: item.oldPath });
       }
       for (const item of catchAllPlan?.blockedRenames ?? []) {
-        files.push({ id: item.fileId, name: item.newPath, type: "conflict" });
+        files.push({ id: item.fileId, name: item.newPath, type: "conflict", ignorable: true });
       }
     }
 
@@ -1176,6 +1245,7 @@ export class DriveSyncManager {
     new Notice(t("driveSync.startPushing"));
 
     try {
+      await this.waitForRefreshCounts();
       const tokens = await this.getTokens();
       let { accessToken } = tokens;
       const { rootFolderId } = tokens;
@@ -1225,7 +1295,7 @@ export class DriveSyncManager {
       // without adding one network request per changed file.
       const latestRemoteFiles = await drive.listUserFiles(accessToken, rootFolderId);
       if (remoteSnapshotChanged(syncRemoteMeta, latestRemoteFiles, (path) => this.isExcludedPath(path))) {
-        this.lastError = "Remote changed during push preparation. Check changes and retry.";
+        this.lastError = "Remote changed during push preparation. Please pull first.";
         this.syncStatus = "error";
         new Notice(`Drive sync push failed: ${this.lastError}`);
         return;
@@ -1235,6 +1305,23 @@ export class DriveSyncManager {
       if (!remoteMeta) {
         remoteMeta = { lastUpdatedAt: new Date().toISOString(), files: {} };
       }
+
+      // Checkpoint the remote metadata periodically so an interrupted push
+      // leaves Drive IDs recorded rather than orphaned. Writing after every
+      // batch would re-upload the whole metadata document (and re-run a Drive
+      // name search) per five files, so the file ID is cached and writes are
+      // time-throttled; anything newer than the last checkpoint is recovered by
+      // readReconciledRemoteMeta() adopting the untracked uploads.
+      const metaRef = remoteMeta;
+      let metaFileId: string | null = null;
+      let lastCheckpointAt = Date.now();
+      const checkpointRemoteMeta = async (force = false): Promise<void> => {
+        if (!force && Date.now() - lastCheckpointAt < PUSH_CHECKPOINT_INTERVAL_MS) return;
+        metaRef.lastUpdatedAt = new Date().toISOString();
+        accessToken = (await this.getTokens()).accessToken;
+        metaFileId = await writeRemoteSyncMeta(accessToken, rootFolderId, metaRef, metaFileId);
+        lastCheckpointAt = Date.now();
+      };
 
       const idToPath = buildIdToPathMap(syncLocalMeta);
 
@@ -1251,9 +1338,7 @@ export class DriveSyncManager {
         upsertFileInMeta(remoteMeta, driveFile, newPath);
       }
       if (renames.size > 0) {
-        remoteMeta.lastUpdatedAt = new Date().toISOString();
-        accessToken = (await this.getTokens()).accessToken;
-        await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
+        await checkpointRemoteMeta(true);
       }
 
       // 7. Upload modified files (existing)
@@ -1278,12 +1363,10 @@ export class DriveSyncManager {
           const result = await this.uploadFile(accessToken, rootFolderId, path, existingId, remoteMeta, syncLocalMeta, checksums);
           uploadResults.push({ path, ...result });
         }));
-        // Checkpoint every completed batch. If a later request fails, newly
-        // created Drive IDs remain tracked and cannot be uploaded again.
-        remoteMeta.lastUpdatedAt = new Date().toISOString();
-        accessToken = (await this.getTokens()).accessToken;
-        await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
         const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        // Force a checkpoint before bailing out so the IDs created by the
+        // successful uploads in this batch are not lost.
+        await checkpointRemoteMeta(rejected !== undefined);
         if (rejected) throw rejected.reason;
       }
 
@@ -1328,14 +1411,10 @@ export class DriveSyncManager {
             console.warn(`[DriveSync] Failed to move file to trash on Drive: ${path}`, err);
           }
         }
-        remoteMeta.lastUpdatedAt = new Date().toISOString();
-        accessToken = (await this.getTokens()).accessToken;
-        await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
       }
 
       // 10. Write updated remote meta
-      remoteMeta.lastUpdatedAt = new Date().toISOString();
-      await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
+      await checkpointRemoteMeta(true);
 
       // 11. Update local meta (with vault stats for mtime/size caching)
       const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, syncLocalMeta, vaultStats);
@@ -1484,6 +1563,7 @@ export class DriveSyncManager {
     new Notice(t("driveSync.startPulling"));
 
     try {
+      await this.waitForRefreshCounts();
       const tokens = await this.getTokens();
       const { accessToken, rootFolderId } = tokens;
 
@@ -1759,12 +1839,20 @@ export class DriveSyncManager {
       }));
     }
 
-    // 3. Update local meta
+    // 3. Update local meta. Ignored files keep their previous entry: their
+    // local copy was deliberately left alone, so adopting the remote name and
+    // checksum here would map them to a path they do not occupy and make the
+    // next push overwrite whichever file actually lives there.
     const vaultStats = new Map<string, { mtime: number; size: number }>();
     for (const f of await this.getAllVaultFiles()) {
       vaultStats.set(f.path, { mtime: f.stat.mtime, size: f.stat.size });
     }
-    const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, localMeta, vaultStats);
+    const updatedLocalMeta = toLocalSyncMeta(
+      this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta,
+      localMeta,
+      vaultStats,
+      ignoredIds
+    );
     await writeLocalSyncMeta(this.app, updatedLocalMeta);
 
     return { cleanupDeleted: cleanupDeleteCount, cleanupRenamed: cleanupRenameCount };
@@ -1898,8 +1986,10 @@ export class DriveSyncManager {
     new Notice(t("driveSync.startFullPulling"));
 
     try {
+      await this.waitForRefreshCounts();
       const tokens = await this.getTokens();
-      const { accessToken, rootFolderId } = tokens;
+      let { accessToken } = tokens;
+      const { rootFolderId } = tokens;
 
       // Get remote meta (or rebuild)
       const remoteMeta = await this.readReconciledRemoteMeta(accessToken, rootFolderId);
@@ -1923,6 +2013,8 @@ export class DriveSyncManager {
 
       for (let i = 0; i < fileIds.length; i += CONCURRENCY) {
         const batch = fileIds.slice(i, i + CONCURRENCY);
+        // Refresh per batch: a whole-vault download can outlast the token.
+        accessToken = (await this.getTokens()).accessToken;
         await Promise.all(batch.map(async (fileId) => {
           await this.downloadFile(accessToken, rootFolderId, fileId, syncRemoteMeta, newLocalMeta);
           downloadedCount++;
@@ -1997,8 +2089,10 @@ export class DriveSyncManager {
     new Notice(t("driveSync.startFullPushing"));
 
     try {
+      await this.waitForRefreshCounts();
       const tokens = await this.getTokens();
-      const { accessToken, rootFolderId } = tokens;
+      let { accessToken } = tokens;
+      const { rootFolderId } = tokens;
 
       // Build fresh local meta
       const newLocalMeta: LocalDriveSyncMeta = {
@@ -2043,18 +2137,33 @@ export class DriveSyncManager {
         ),
       };
 
-      // Upload all files
+      // Upload all files. Like push(), refresh the token and checkpoint the
+      // remote metadata as we go: a whole-vault upload is the longest operation
+      // the plugin performs and can outlast both the token and the session.
       let uploadedCount = 0;
       const allPaths = vaultFiles.map(f => f.path);
+      let metaFileId: string | null = null;
+      let lastCheckpointAt = Date.now();
+      const checkpointRemoteMeta = async (force = false): Promise<void> => {
+        if (!force && Date.now() - lastCheckpointAt < PUSH_CHECKPOINT_INTERVAL_MS) return;
+        remoteMeta.lastUpdatedAt = new Date().toISOString();
+        accessToken = (await this.getTokens()).accessToken;
+        metaFileId = await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta, metaFileId);
+        lastCheckpointAt = Date.now();
+      };
 
       for (let i = 0; i < allPaths.length; i += CONCURRENCY) {
         const batch = allPaths.slice(i, i + CONCURRENCY);
-        await Promise.all(batch.map(async (path) => {
+        accessToken = (await this.getTokens()).accessToken;
+        const results = await Promise.allSettled(batch.map(async (path) => {
           const cachedId = oldLocalMeta.pathToId[path];
           const existingId = cachedId && reusableRemoteIds.has(cachedId) ? cachedId : undefined;
           await this.uploadFile(accessToken, rootFolderId, path, existingId, remoteMeta, newLocalMeta, checksums);
           uploadedCount++;
         }));
+        const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        await checkpointRemoteMeta(rejected !== undefined);
+        if (rejected) throw rejected.reason;
       }
 
       // Move remote-only files to trash so full push makes Drive match the local vault.
@@ -2068,6 +2177,7 @@ export class DriveSyncManager {
         return true;
       });
       if (filesToTrash.length > 0) {
+        accessToken = (await this.getTokens()).accessToken;
         const trashFolderId = await drive.ensureSubFolder(accessToken, rootFolderId, "trash");
         for (const file of filesToTrash) {
           await drive.moveFile(accessToken, file.id, trashFolderId, rootFolderId);
@@ -2075,8 +2185,7 @@ export class DriveSyncManager {
       }
 
       // Write updated remote meta
-      remoteMeta.lastUpdatedAt = new Date().toISOString();
-      await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
+      await checkpointRemoteMeta(true);
 
       // Save local meta (with vault stats for mtime/size caching)
       const updatedLocalMeta = toLocalSyncMeta(this.getObsidianSyncableRemoteMeta(remoteMeta) ?? remoteMeta, newLocalMeta, fullPushVaultStats);
@@ -2404,12 +2513,17 @@ export class DriveSyncManager {
     return results;
   }
 
-  async applyTempFile(tempFileId: string, payload: TempFilePayload): Promise<void> {
+  async applyTempFile(tempFileId: string, payload: TempFilePayload): Promise<drive.DriveFile> {
     const tokens = await this.getTokens();
     const { accessToken, rootFolderId } = tokens;
 
     const vaultPath = payload.filePath ?? payload.fileId;
-    const isNewFile = payload.fileId === vaultPath;
+    // saveTempFile() sets fileId to the vault path when the file has never been
+    // pushed, so a payload where both fields match describes a file that does
+    // not exist on Drive yet. Payloads written before filePath existed (or by
+    // another client) must not take this branch: their fileId is a real Drive
+    // ID, and creating a file named after it would litter the vault root.
+    const isNewFile = payload.filePath !== undefined && payload.fileId === payload.filePath;
     const mimeType = getMimeType(vaultPath);
     const fileMeta = isNewFile
       ? payload.isBinary
@@ -2424,11 +2538,12 @@ export class DriveSyncManager {
       lastUpdatedAt: new Date().toISOString(),
       files: {},
     };
-    upsertFileInMeta(remoteMeta, fileMeta, vaultPath);
+    upsertFileInMeta(remoteMeta, fileMeta, payload.filePath ?? fileMeta.name);
     await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
 
     // Delete the temp file
     await drive.deleteFile(accessToken, tempFileId);
+    return fileMeta;
   }
 
   /**
@@ -2487,7 +2602,13 @@ export class DriveSyncManager {
     // Resolve vault path from fileId
     const localMeta = await readLocalSyncMeta(this.app);
     const idToPath = buildIdToPathMap(localMeta);
-    const vaultPath = payload.filePath ?? idToPath[payload.fileId] ?? payload.fileId;
+    let vaultPath = payload.filePath ?? idToPath[payload.fileId];
+    if (!vaultPath) {
+      // Legacy/GemiHub payloads do not carry filePath. Resolve the real Drive
+      // name instead of ever treating the opaque Drive ID as a vault path.
+      const tokens = await this.getTokens();
+      vaultPath = (await drive.getFileMetadata(tokens.accessToken, payload.fileId)).name;
+    }
 
     // Ensure parent directory exists
     const dirPath = vaultPath.substring(0, vaultPath.lastIndexOf("/"));
@@ -2513,7 +2634,24 @@ export class DriveSyncManager {
     }
 
     // Apply to Drive and delete temp
-    await this.applyTempFile(tempFileId, payload);
+    const fileMeta = await this.applyTempFile(tempFileId, payload);
+
+    // Record the applied state locally. The vault copy and the Drive copy are
+    // now identical, so without this the stale local checksum makes the next
+    // sync report a conflict on a file that is actually up to date.
+    for (const [path, id] of Object.entries(localMeta.pathToId)) {
+      if (id === fileMeta.id && path !== vaultPath) delete localMeta.pathToId[path];
+    }
+    localMeta.pathToId[vaultPath] = fileMeta.id;
+    const stat = await this.app.vault.adapter.stat(vaultPath);
+    localMeta.files[fileMeta.id] = {
+      md5Checksum: fileMeta.md5Checksum ?? "",
+      modifiedTime: fileMeta.modifiedTime ?? "",
+      name: vaultPath,
+      localMtime: stat?.mtime,
+      localSize: stat?.size,
+    };
+    await writeLocalSyncMeta(this.app, localMeta);
   }
 
   async deleteTempFiles(fileIds: string[]): Promise<number> {

@@ -189,13 +189,19 @@ export class DriveSyncDiffModal extends Modal {
         this.close();
         resolve?.({ confirmed: false });
         const target = this.app.vault.getAbstractFileByPath(file.name);
-        if (target instanceof TFile) void this.app.workspace.getLeaf(false).openFile(target);
+        if (target instanceof TFile) {
+          void this.app.workspace.getLeaf(false).openFile(target);
+        } else {
+          // Extensions Obsidian does not index (html, css, …) sync fine but
+          // have no TFile to open — say so instead of doing nothing.
+          new Notice(t("driveSync.openFailed", { name: file.name }));
+        }
       });
     }
 
-    // Conflicts include blocked remote renames. Allow skipping those so pull
-    // never becomes an error-only dead end with no user action available.
-    if (this.direction === "pull" && (file.type === "modified" || file.type === "conflict")) {
+    // Ignore toggle (pull only). Set for remote-modified files and for blocked
+    // remote renames, so the latter never become an error-only dead end.
+    if (this.direction === "pull" && file.ignorable) {
       const ignoreBtn = headerEl.createEl("button", { cls: "gemihub-sync-diff-toggle" });
       const ignoreIconEl = ignoreBtn.createSpan();
       setIcon(ignoreIconEl, "eye-off");
