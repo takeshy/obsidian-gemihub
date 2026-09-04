@@ -12,7 +12,7 @@ import {
   findFileByExactName,
   type DriveFile,
 } from "./googleDrive";
-import { SYNC_META_FILE_NAME, type SyncMeta } from "./syncDiff";
+import { SYNC_META_FILE_NAME, type FileSyncMeta, type SyncMeta } from "./syncDiff";
 
 // ========================================
 // Local sync metadata (stored in Vault)
@@ -158,6 +158,8 @@ export async function rebuildSyncMeta(
       createdTime: f.createdTime,
       shared: prev?.shared,
       webViewLink: prev?.webViewLink,
+      publicPath: prev?.publicPath,
+      size: f.size ?? prev?.size,
     };
   }
   await writeRemoteSyncMeta(accessToken, rootFolderId, meta);
@@ -166,20 +168,37 @@ export async function rebuildSyncMeta(
 
 /**
  * Add or update a single file entry in remote meta.
+ *
+ * GemiHub keeps the publish state of a file (`shared`, `webViewLink`, the
+ * signed `publicPath`) only inside `_sync-meta.json`; Drive itself does not
+ * return it. Rebuilding the entry from the upload response alone therefore
+ * un-publishes the file in GemiHub's tree on every push from Obsidian. Carry
+ * those fields over from `previous` (defaults to the entry being replaced —
+ * Full Push starts from an empty meta, so it passes the pre-push entry).
  */
 export function upsertFileInMeta(
   meta: SyncMeta,
   file: DriveFile,
-  vaultPath?: string
+  vaultPath?: string,
+  previous: FileSyncMeta | undefined = meta.files[file.id]
 ): void {
-  meta.files[file.id] = {
+  const entry: FileSyncMeta = {
     name: file.name,
     path: vaultPath,
     mimeType: file.mimeType,
     md5Checksum: file.md5Checksum ?? "",
     modifiedTime: file.modifiedTime ?? "",
-    createdTime: file.createdTime,
+    createdTime: file.createdTime ?? previous?.createdTime,
   };
+  if (previous?.shared !== undefined) entry.shared = previous.shared;
+  if (previous?.webViewLink !== undefined) entry.webViewLink = previous.webViewLink;
+  if (previous?.publicPath !== undefined) entry.publicPath = previous.publicPath;
+  // Upload responses carry the new size; when they do not, the old size is
+  // only still right if the content did not change.
+  const size = file.size
+    ?? (previous && previous.md5Checksum === entry.md5Checksum ? previous.size : undefined);
+  if (size !== undefined) entry.size = size;
+  meta.files[file.id] = entry;
   meta.lastUpdatedAt = new Date().toISOString();
 }
 

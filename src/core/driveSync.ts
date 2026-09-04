@@ -24,6 +24,7 @@ import { ensureRootFolder } from "./googleDrive";
 import * as drive from "./googleDrive";
 import {
   computeSyncDiff,
+  type FileSyncMeta,
   type SyncMeta,
   type SyncDiff,
   type ConflictInfo,
@@ -1578,7 +1579,11 @@ export class DriveSyncManager {
     existingDriveId: string | undefined,
     remoteMeta: SyncMeta,
     localMeta: LocalDriveSyncMeta,
-    checksums: Map<string, string>
+    checksums: Map<string, string>,
+    // Full Push rebuilds remoteMeta from scratch, so the entry being replaced
+    // is not in `remoteMeta`; the caller passes the pre-push entry to keep
+    // GemiHub's publish state (shared/webViewLink/publicPath) on the file.
+    previousEntry?: FileSyncMeta
   ): Promise<{ oldContent: string | null; newContent: string | null }> {
     // Read via adapter so Obsidian-unindexed extensions (html, css, js, etc.) upload.
     if (!(await this.app.vault.adapter.exists(vaultPath))) return { oldContent: null, newContent: null };
@@ -1624,7 +1629,7 @@ export class DriveSyncManager {
     }
 
     // Update remote meta
-    upsertFileInMeta(remoteMeta, driveFile, vaultPath);
+    upsertFileInMeta(remoteMeta, driveFile, vaultPath, previousEntry ?? remoteMeta.files[driveFile.id]);
 
     // Update local meta mappings
     localMeta.pathToId[vaultPath] = driveFile.id;
@@ -2219,6 +2224,8 @@ export class DriveSyncManager {
                 createdTime: file.createdTime,
                 shared: prev?.shared,
                 webViewLink: prev?.webViewLink,
+                publicPath: prev?.publicPath,
+                size: file.size ?? prev?.size,
               }];
             })
         ),
@@ -2245,7 +2252,10 @@ export class DriveSyncManager {
         const results = await Promise.allSettled(batch.map(async (path) => {
           const cachedId = oldLocalMeta.pathToId[path];
           const existingId = cachedId && reusableRemoteIds.has(cachedId) ? cachedId : undefined;
-          await this.uploadFile(accessToken, rootFolderId, path, existingId, remoteMeta, newLocalMeta, checksums);
+          await this.uploadFile(
+            accessToken, rootFolderId, path, existingId, remoteMeta, newLocalMeta, checksums,
+            existingId ? existingRemoteMeta?.files[existingId] : undefined,
+          );
           uploadedCount++;
         }));
         const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");

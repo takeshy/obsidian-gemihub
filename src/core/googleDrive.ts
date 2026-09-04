@@ -184,7 +184,7 @@ export async function listFiles(
   do {
     const url = new URL(`${DRIVE_API}/files`);
     url.searchParams.set("q", query);
-    url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum)");
+    url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size)");
     url.searchParams.set("orderBy", "modifiedTime desc");
     url.searchParams.set("pageSize", "1000");
     if (pageToken) url.searchParams.set("pageToken", pageToken);
@@ -274,7 +274,7 @@ export async function createFile(
     `--${boundary}--`;
 
   const res = await driveRequest(
-    `${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum`,
+    `${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
     accessToken,
     {
       method: "POST",
@@ -312,7 +312,7 @@ export async function createFileBinary(
   combined.set(epilogue, preamble.byteLength + contentBuffer.byteLength);
 
   const res = await driveRequest(
-    `${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum`,
+    `${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
     accessToken,
     {
       method: "POST",
@@ -334,7 +334,7 @@ export async function updateFile(
   mimeType: string = "text/plain"
 ): Promise<DriveFile> {
   const res = await driveRequest(
-    `${DRIVE_UPLOAD_API}/files/${fileId}?uploadType=media&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum`,
+    `${DRIVE_UPLOAD_API}/files/${fileId}?uploadType=media&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
     accessToken,
     {
       method: "PATCH",
@@ -356,7 +356,7 @@ export async function updateFileBinary(
   mimeType: string = "application/octet-stream"
 ): Promise<DriveFile> {
   const res = await driveRequest(
-    `${DRIVE_UPLOAD_API}/files/${fileId}?uploadType=media&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum`,
+    `${DRIVE_UPLOAD_API}/files/${fileId}?uploadType=media&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
     accessToken,
     {
       method: "PATCH",
@@ -394,7 +394,7 @@ export async function renameFile(
   newName: string
 ): Promise<DriveFile> {
   const res = await driveRequest(
-    `${DRIVE_API}/files/${fileId}?fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum`,
+    `${DRIVE_API}/files/${fileId}?fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
     accessToken,
     {
       method: "PATCH",

@@ -228,6 +228,55 @@ describe("remote meta mutation helpers", () => {
     expect(meta.lastUpdatedAt).not.toBe("old");
   });
 
+  it("upsert keeps GemiHub publish state that Drive does not return", () => {
+    const meta: SyncMeta = {
+      lastUpdatedAt: "old",
+      files: {
+        id1: {
+          name: "a.md", mimeType: "text/markdown", md5Checksum: "abc", modifiedTime: "t",
+          shared: true, webViewLink: "https://drive/view", publicPath: "/public/file/id1/a.md?sig=x", size: "10",
+        },
+      },
+    };
+    upsertFileInMeta(
+      meta,
+      { id: "id1", name: "a.md", mimeType: "text/markdown", md5Checksum: "def", modifiedTime: "t2" },
+      "a.md"
+    );
+
+    expect(meta.files.id1).toMatchObject({
+      md5Checksum: "def",
+      shared: true,
+      webViewLink: "https://drive/view",
+      publicPath: "/public/file/id1/a.md?sig=x",
+    });
+    // Content changed and Drive returned no size: the old size is stale.
+    expect(meta.files.id1.size).toBeUndefined();
+  });
+
+  it("upsert takes the previous entry from the caller when meta was rebuilt", () => {
+    const meta: SyncMeta = { lastUpdatedAt: "old", files: {} };
+    upsertFileInMeta(
+      meta,
+      { id: "id1", name: "a.md", mimeType: "text/markdown", md5Checksum: "abc", modifiedTime: "t", size: "12" },
+      "a.md",
+      { name: "a.md", mimeType: "text/markdown", md5Checksum: "abc", modifiedTime: "t0", shared: true, publicPath: "/p" }
+    );
+
+    expect(meta.files.id1).toMatchObject({ shared: true, publicPath: "/p", size: "12" });
+  });
+
+  it("upsert leaves publish fields absent for a never-published file", () => {
+    const meta: SyncMeta = { lastUpdatedAt: "old", files: {} };
+    upsertFileInMeta(
+      meta,
+      { id: "id1", name: "a.md", mimeType: "text/markdown", md5Checksum: "abc", modifiedTime: "t" },
+      "a.md"
+    );
+    expect("shared" in meta.files.id1).toBe(false);
+    expect("publicPath" in meta.files.id1).toBe(false);
+  });
+
   it("remove deletes the entry", () => {
     const meta: SyncMeta = {
       lastUpdatedAt: "old",

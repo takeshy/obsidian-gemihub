@@ -12,6 +12,9 @@ export interface FileSyncMeta {
   createdTime?: string;
   shared?: boolean;
   webViewLink?: string;
+  /** Signed origin-relative public link minted by GemiHub (published files only). */
+  publicPath?: string;
+  size?: string;
 }
 
 export interface SyncMeta {
