@@ -1,374 +1,144 @@
 // Google Drive API client for Obsidian.
-// Ported from GemiHub's google-drive.server.ts — uses Obsidian's requestUrl instead of fetch.
+// The REST client (requests, retries, pagination, multipart bodies, errors) is
+// shared with GemiHub web and Desktop through gemihub-sync-core; this module
+// only adapts Obsidian's requestUrl as the transport.
 
-import { requestUrl, type RequestUrlResponse } from "obsidian";
+import { requestUrl } from "obsidian";
+import {
+  createDriveClient,
+  headersFromRecord,
+  type DriveFile,
+  type DriveHttpRequest,
+  type DriveHttpResponse,
+} from "gemihub-sync-core/drive";
 
-const DRIVE_API = "https://www.googleapis.com/drive/v3";
-const DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
+export { DriveApiError, isDriveNotFoundError, type DriveFile } from "gemihub-sync-core/drive";
 
-function escapeDriveQuery(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
 }
 
-const SYSTEM_FILES = new Set(["settings.json", "_sync-meta.json"]);
-
-export interface DriveFile {
-  id: string;
-  name: string;
-  mimeType: string;
-  modifiedTime?: string;
-  createdTime?: string;
-  parents?: string[];
-  trashed?: boolean;
-  webViewLink?: string;
-  md5Checksum?: string;
-  size?: string;
-}
-
-interface DriveListResponse {
-  files: DriveFile[];
-  nextPageToken?: string;
-}
-
-/**
- * Make a Drive API request with retry on 429/503.
- */
-async function driveRequest(
-  url: string,
-  accessToken: string,
-  options: {
-    method?: string;
-    headers?: Record<string, string>;
-    body?: string | ArrayBuffer;
-    contentType?: string;
-  } = {},
-  retries = 2
-): Promise<RequestUrlResponse> {
+/** requestUrl as a DriveTransport (Content-Type goes through its contentType field). */
+async function requestUrlTransport(request: DriveHttpRequest): Promise<DriveHttpResponse> {
+  const headers = { ...request.headers };
+  const contentType = headers["Content-Type"];
+  delete headers["Content-Type"];
   const response = await requestUrl({
-    url,
-    method: options.method || "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      ...options.headers,
-    },
-    body: options.body,
-    contentType: options.contentType,
+    url: request.url,
+    method: request.method,
+    headers,
+    contentType,
+    body: request.body instanceof Uint8Array ? toArrayBuffer(request.body) : request.body,
     throw: false,
   });
-
-  // Retry on 429 (rate limit) or 503 (service unavailable)
-  if ((response.status === 429 || response.status === 503) && retries > 0) {
-    const retryAfter = parseInt(response.headers["retry-after"] || "2", 10);
-    await new Promise((r) => setTimeout(r, retryAfter * 1000));
-    return driveRequest(url, accessToken, options, retries - 1);
-  }
-
-  if (response.status < 200 || response.status >= 300) {
-    const body = response.text?.slice(0, 200) ?? "";
-    throw new Error(`Drive API error ${response.status}: ${body}`);
-  }
-
-  return response;
+  return {
+    status: response.status,
+    headers: headersFromRecord(response.headers),
+    text: () => Promise.resolve(response.text),
+    json: () => Promise.resolve(response.json as unknown),
+    arrayBuffer: () => Promise.resolve(response.arrayBuffer),
+  };
 }
+
+const drive = createDriveClient(requestUrlTransport);
 
 // ========================================
 // Folder operations
 // ========================================
 
-export async function ensureRootFolder(accessToken: string, folderName: string = "gemihub"): Promise<string> {
-  const query = `name='${escapeDriveQuery(folderName)}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-  const res = await driveRequest(
-    `${DRIVE_API}/files?q=${encodeURIComponent(query)}&fields=files(id,name)`,
-    accessToken
-  );
-  const data = res.json as DriveListResponse;
-
-  if (data.files.length > 0) {
-    return data.files[0].id;
-  }
-
-  const createRes = await driveRequest(`${DRIVE_API}/files`, accessToken, {
-    method: "POST",
-    contentType: "application/json",
-    body: JSON.stringify({
-      name: folderName,
-      mimeType: "application/vnd.google-apps.folder",
-    }),
-  });
-  const folder = createRes.json as DriveFile;
-  return folder.id;
+export function ensureRootFolder(accessToken: string, folderName: string = "gemihub"): Promise<string> {
+  return drive.ensureRootFolder(accessToken, folderName);
 }
 
-// In-flight deduplication for ensureSubFolder
-const subFolderInflight = new Map<string, Promise<string>>();
-
-export async function ensureSubFolder(
-  accessToken: string,
-  parentId: string,
-  folderName: string
-): Promise<string> {
-  const cacheKey = `${parentId}:${folderName}`;
-  const inflight = subFolderInflight.get(cacheKey);
-  if (inflight) return inflight;
-
-  const promise = ensureSubFolderImpl(accessToken, parentId, folderName).finally(() => {
-    subFolderInflight.delete(cacheKey);
-  });
-  subFolderInflight.set(cacheKey, promise);
-  return promise;
-}
-
-async function ensureSubFolderImpl(
-  accessToken: string,
-  parentId: string,
-  folderName: string
-): Promise<string> {
-  const query = `name='${escapeDriveQuery(folderName)}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-  const res = await driveRequest(
-    `${DRIVE_API}/files?q=${encodeURIComponent(query)}&fields=files(id,name)`,
-    accessToken
-  );
-  const data = res.json as DriveListResponse;
-
-  if (data.files.length > 0) {
-    return data.files[0].id;
-  }
-
-  const createRes = await driveRequest(`${DRIVE_API}/files`, accessToken, {
-    method: "POST",
-    contentType: "application/json",
-    body: JSON.stringify({
-      name: folderName,
-      mimeType: "application/vnd.google-apps.folder",
-      parents: [parentId],
-    }),
-  });
-  const folder = createRes.json as DriveFile;
-  return folder.id;
+export function ensureSubFolder(accessToken: string, parentId: string, folderName: string): Promise<string> {
+  return drive.ensureSubFolder(accessToken, parentId, folderName);
 }
 
 /**
  * Ensure nested folder path exists on Drive, returning the deepest folder's ID.
  * e.g., "notes/daily" creates "notes" then "daily" inside it.
  */
-export async function ensureFolderPath(
-  accessToken: string,
-  rootFolderId: string,
-  folderPath: string
-): Promise<string> {
-  const parts = folderPath.split("/").filter(Boolean);
-  let currentParentId = rootFolderId;
-  for (const part of parts) {
-    currentParentId = await ensureSubFolder(accessToken, currentParentId, part);
-  }
-  return currentParentId;
+export function ensureFolderPath(accessToken: string, rootFolderId: string, folderPath: string): Promise<string> {
+  return drive.ensureFolderPath(accessToken, rootFolderId, folderPath);
+}
+
+export function listFolders(accessToken: string, parentId: string): Promise<DriveFile[]> {
+  return drive.listFolders(accessToken, parentId);
 }
 
 // ========================================
-// File listing
+// File listing and lookup
 // ========================================
 
-export async function listFiles(
-  accessToken: string,
-  folderId: string,
-  mimeType?: string
-): Promise<DriveFile[]> {
-  let query = `'${folderId}' in parents and trashed=false`;
-  if (mimeType) {
-    query += ` and mimeType='${mimeType}'`;
-  }
-
-  const allFiles: DriveFile[] = [];
-  let pageToken: string | undefined;
-
-  do {
-    const url = new URL(`${DRIVE_API}/files`);
-    url.searchParams.set("q", query);
-    url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size)");
-    url.searchParams.set("orderBy", "modifiedTime desc");
-    url.searchParams.set("pageSize", "1000");
-    if (pageToken) url.searchParams.set("pageToken", pageToken);
-
-    const res = await driveRequest(url.toString(), accessToken);
-    const data = res.json as DriveListResponse;
-    allFiles.push(...data.files);
-    pageToken = data.nextPageToken;
-  } while (pageToken);
-
-  return allFiles;
+export function listFiles(accessToken: string, folderId: string, mimeType?: string): Promise<DriveFile[]> {
+  return drive.listFiles(accessToken, folderId, mimeType);
 }
 
-export async function listUserFiles(
-  accessToken: string,
-  rootFolderId: string
-): Promise<DriveFile[]> {
-  const allFiles = await listFiles(accessToken, rootFolderId);
-  return allFiles.filter(
-    (f) =>
-      f.mimeType !== "application/vnd.google-apps.folder" &&
-      !SYSTEM_FILES.has(f.name)
-  );
+/** Syncable root files (no folders, system files or Workspace-native files). */
+export function listUserFiles(accessToken: string, rootFolderId: string): Promise<DriveFile[]> {
+  return drive.listUserFiles(accessToken, rootFolderId);
+}
+
+export function findFileByExactName(accessToken: string, name: string, parentId?: string): Promise<DriveFile | null> {
+  return drive.findFileByExactName(accessToken, name, parentId);
+}
+
+export function getFileMetadata(accessToken: string, fileId: string): Promise<DriveFile> {
+  return drive.getFileMetadata(accessToken, fileId);
 }
 
 // ========================================
-// File read
+// File read / write
 // ========================================
 
-export async function readFile(
-  accessToken: string,
-  fileId: string
-): Promise<string> {
-  const res = await driveRequest(
-    `${DRIVE_API}/files/${fileId}?alt=media`,
-    accessToken
-  );
-  return res.text;
+export function readFile(accessToken: string, fileId: string): Promise<string> {
+  return drive.readFile(accessToken, fileId);
 }
 
-export async function readFileRaw(
-  accessToken: string,
-  fileId: string
-): Promise<ArrayBuffer> {
-  const res = await driveRequest(
-    `${DRIVE_API}/files/${fileId}?alt=media`,
-    accessToken
-  );
-  return res.arrayBuffer;
+export async function readFileRaw(accessToken: string, fileId: string): Promise<ArrayBuffer> {
+  return toArrayBuffer(await drive.readFileBytes(accessToken, fileId));
 }
 
-// ========================================
-// File metadata
-// ========================================
-
-export async function getFileMetadata(
-  accessToken: string,
-  fileId: string
-): Promise<DriveFile> {
-  const res = await driveRequest(
-    `${DRIVE_API}/files/${fileId}?fields=id,name,mimeType,modifiedTime,createdTime,parents,trashed,webViewLink,md5Checksum,size`,
-    accessToken
-  );
-  return res.json as DriveFile;
-}
-
-// ========================================
-// File create (text)
-// ========================================
-
-export async function createFile(
+export function createFile(
   accessToken: string,
   name: string,
   content: string,
   parentId: string,
   mimeType: string = "text/plain"
 ): Promise<DriveFile> {
-  const metadata = { name, parents: [parentId], mimeType };
-  const boundary = "-------boundary" + Date.now();
-  const body =
-    `--${boundary}\r\n` +
-    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
-    `${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\n` +
-    `Content-Type: ${mimeType}\r\n\r\n` +
-    `${content}\r\n` +
-    `--${boundary}--`;
-
-  const res = await driveRequest(
-    `${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
-    accessToken,
-    {
-      method: "POST",
-      contentType: `multipart/related; boundary=${boundary}`,
-      body,
-    }
-  );
-  return res.json as DriveFile;
+  return drive.createFile(accessToken, name, content, parentId, mimeType);
 }
 
-// ========================================
-// File create (binary)
-// ========================================
-
-export async function createFileBinary(
+export function createFileBinary(
   accessToken: string,
   name: string,
   contentBuffer: ArrayBuffer,
   parentId: string,
   mimeType: string = "application/octet-stream"
 ): Promise<DriveFile> {
-  const metadata = JSON.stringify({ name, parents: [parentId], mimeType });
-  const boundary = "-------boundary" + Date.now();
-
-  const preamble = new TextEncoder().encode(
-    `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${metadata}\r\n--${boundary}\r\nContent-Type: ${mimeType}\r\n\r\n`
-  );
-  const epilogue = new TextEncoder().encode(`\r\n--${boundary}--`);
-
-  // Concatenate ArrayBuffers
-  const totalLength = preamble.byteLength + contentBuffer.byteLength + epilogue.byteLength;
-  const combined = new Uint8Array(totalLength);
-  combined.set(preamble, 0);
-  combined.set(new Uint8Array(contentBuffer), preamble.byteLength);
-  combined.set(epilogue, preamble.byteLength + contentBuffer.byteLength);
-
-  const res = await driveRequest(
-    `${DRIVE_UPLOAD_API}/files?uploadType=multipart&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
-    accessToken,
-    {
-      method: "POST",
-      contentType: `multipart/related; boundary=${boundary}`,
-      body: combined.buffer,
-    }
-  );
-  return res.json as DriveFile;
+  return drive.createFileBinary(accessToken, name, contentBuffer, parentId, mimeType);
 }
 
-// ========================================
-// File update (text)
-// ========================================
-
-export async function updateFile(
+export function updateFile(
   accessToken: string,
   fileId: string,
   content: string,
   mimeType: string = "text/plain"
 ): Promise<DriveFile> {
-  const res = await driveRequest(
-    `${DRIVE_UPLOAD_API}/files/${fileId}?uploadType=media&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
-    accessToken,
-    {
-      method: "PATCH",
-      contentType: mimeType,
-      body: content,
-    }
-  );
-  return res.json as DriveFile;
+  return drive.updateFile(accessToken, fileId, content, mimeType);
 }
 
-// ========================================
-// File update (binary)
-// ========================================
-
-export async function updateFileBinary(
+export function updateFileBinary(
   accessToken: string,
   fileId: string,
   contentBuffer: ArrayBuffer,
   mimeType: string = "application/octet-stream"
 ): Promise<DriveFile> {
-  const res = await driveRequest(
-    `${DRIVE_UPLOAD_API}/files/${fileId}?uploadType=media&fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
-    accessToken,
-    {
-      method: "PATCH",
-      contentType: mimeType,
-      body: contentBuffer,
-    }
-  );
-  return res.json as DriveFile;
+  return drive.updateFileBinary(accessToken, fileId, contentBuffer, mimeType);
 }
 
 // ========================================
-// File move
+// Move / rename / delete
 // ========================================
 
 export async function moveFile(
@@ -377,77 +147,14 @@ export async function moveFile(
   newParentId: string,
   oldParentId: string
 ): Promise<void> {
-  await driveRequest(
-    `${DRIVE_API}/files/${fileId}?addParents=${encodeURIComponent(newParentId)}&removeParents=${encodeURIComponent(oldParentId)}&fields=id`,
-    accessToken,
-    { method: "PATCH" }
-  );
+  await drive.moveFile(accessToken, fileId, newParentId, oldParentId);
 }
 
-// ========================================
-// File rename (metadata-only update)
-// ========================================
-
-export async function renameFile(
-  accessToken: string,
-  fileId: string,
-  newName: string
-): Promise<DriveFile> {
-  const res = await driveRequest(
-    `${DRIVE_API}/files/${fileId}?fields=id,name,mimeType,modifiedTime,createdTime,webViewLink,md5Checksum,size`,
-    accessToken,
-    {
-      method: "PATCH",
-      contentType: "application/json",
-      body: JSON.stringify({ name: newName }),
-    }
-  );
-  return res.json as DriveFile;
+export function renameFile(accessToken: string, fileId: string, newName: string): Promise<DriveFile> {
+  return drive.renameFile(accessToken, fileId, newName);
 }
 
-// ========================================
-// File delete (permanent — use for temp/system files only)
-// ========================================
-
-export async function deleteFile(
-  accessToken: string,
-  fileId: string
-): Promise<void> {
-  await driveRequest(`${DRIVE_API}/files/${fileId}`, accessToken, {
-    method: "DELETE",
-  });
-}
-
-// ========================================
-// File search
-// ========================================
-
-export async function findFileByExactName(
-  accessToken: string,
-  name: string,
-  parentId?: string
-): Promise<DriveFile | null> {
-  let query = `name='${escapeDriveQuery(name)}' and mimeType!='application/vnd.google-apps.folder' and trashed=false`;
-  if (parentId) {
-    query += ` and '${parentId}' in parents`;
-  }
-  const res = await driveRequest(
-    `${DRIVE_API}/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType,modifiedTime,md5Checksum)&pageSize=1`,
-    accessToken
-  );
-  const data = res.json as DriveListResponse;
-  return data.files.length > 0 ? data.files[0] : null;
-}
-
-export async function listFolders(
-  accessToken: string,
-  parentId: string
-): Promise<DriveFile[]> {
-  const query = `'${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-  const res = await driveRequest(
-    `${DRIVE_API}/files?q=${encodeURIComponent(query)}&fields=files(id,name,mimeType)&orderBy=name`,
-    accessToken
-  );
-  const data = res.json as DriveListResponse;
-  return data.files;
+/** Permanent delete — use for temp/system files only. */
+export function deleteFile(accessToken: string, fileId: string): Promise<void> {
+  return drive.deleteFile(accessToken, fileId);
 }

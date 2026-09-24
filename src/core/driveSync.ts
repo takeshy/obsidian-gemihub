@@ -22,6 +22,7 @@ import {
 } from "./googleDriveAuth";
 import { ensureRootFolder } from "./googleDrive";
 import * as drive from "./googleDrive";
+import { isDriveNotFoundError } from "gemihub-sync-core/drive";
 import {
   computeSyncDiff,
   type FileSyncMeta,
@@ -930,8 +931,7 @@ export class DriveSyncManager {
           confirmedDeletedOrMovedIds.push(id);
         }
       } catch (err) {
-        const message = formatError(err);
-        if (message.includes("Drive API error 404")) {
+        if (isDriveNotFoundError(err)) {
           confirmedDeletedOrMovedIds.push(id);
         } else {
           throw err;
