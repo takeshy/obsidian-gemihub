@@ -302,7 +302,7 @@ export class DriveSyncManager {
     );
 
     // Get a fresh access token via GemiHub API proxy
-    const refreshed = await refreshAccessToken(apiOrigin, refreshToken);
+    const refreshed = await refreshAccessToken(apiOrigin, refreshToken, auth.rootFolderId);
 
     this.sessionTokens = {
       accessToken: refreshed.accessToken,
