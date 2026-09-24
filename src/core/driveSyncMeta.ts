@@ -8,15 +8,18 @@ import {
   buildConflictBackupName as buildCoreConflictBackupName,
   parseConflictBackupName,
 } from "gemihub-sync-core/conflict";
+import { createSyncMetaStore, removeFilesFromMeta, upsertDriveFileInMeta } from "gemihub-sync-core/sync-meta";
 import {
   listUserFiles,
   readFile,
   createFile,
   updateFile,
-  findFileByExactName,
+  deleteFile,
+  findFilesByExactName,
+  getFileMetadata,
   type DriveFile,
 } from "./googleDrive";
-import { SYNC_META_FILE_NAME, type FileSyncMeta, type SyncMeta } from "./syncDiff";
+import type { FileSyncMeta, SyncMeta } from "./syncDiff";
 
 // ========================================
 // Local sync metadata (stored in Vault)
@@ -87,20 +90,25 @@ export function buildIdToPathMap(meta: LocalDriveSyncMeta): Record<string, strin
 // Remote sync metadata (stored on Drive as _sync-meta.json)
 // ========================================
 
+// Reading (with duplicate consolidation), reconciliation and writing are
+// shared with GemiHub web and Desktop (gemihub-sync-core/sync-meta). Bound
+// through this module's imports so tests can replace the Drive module.
+export const syncMetaStore = createSyncMetaStore({
+  findFilesByExactName: (token, name, parentId) => findFilesByExactName(token, name, parentId),
+  readFile: (token, id) => readFile(token, id),
+  updateFile: (token, id, content, mimeType) => updateFile(token, id, content, mimeType),
+  createFile: (token, name, content, parentId, mimeType) => createFile(token, name, content, parentId, mimeType),
+  deleteFile: (token, id) => deleteFile(token, id),
+  listUserFiles: (token, rootId) => listUserFiles(token, rootId),
+  getFileMetadata: (token, id) => getFileMetadata(token, id),
+});
+
 export async function readRemoteSyncMeta(
   accessToken: string,
   rootFolderId: string
 ): Promise<SyncMeta | null> {
-  const metaFile = await findFileByExactName(
-    accessToken,
-    SYNC_META_FILE_NAME,
-    rootFolderId
-  );
-  if (!metaFile) return null;
-
   try {
-    const content = await readFile(accessToken, metaFile.id);
-    return JSON.parse(content) as SyncMeta;
+    return await syncMetaStore.read(accessToken, rootFolderId);
   } catch (err) {
     console.error("[DriveSync] Failed to read remote sync meta:", err);
     return null;
@@ -113,72 +121,32 @@ export async function readRemoteSyncMeta(
  * Callers that write repeatedly (push checkpoints) should pass the previously
  * returned ID as `knownFileId` to skip the name lookup on every write.
  */
-export async function writeRemoteSyncMeta(
+export function writeRemoteSyncMeta(
   accessToken: string,
   rootFolderId: string,
   meta: SyncMeta,
   knownFileId?: string | null
 ): Promise<string> {
-  const metaFileId = knownFileId
-    ?? (await findFileByExactName(accessToken, SYNC_META_FILE_NAME, rootFolderId))?.id
-    ?? null;
-  const content = JSON.stringify(meta, null, 2);
-
-  if (metaFileId) {
-    await updateFile(accessToken, metaFileId, content, "application/json");
-    return metaFileId;
-  }
-  const created = await createFile(
-    accessToken,
-    SYNC_META_FILE_NAME,
-    content,
-    rootFolderId,
-    "application/json"
-  );
-  return created.id;
+  return syncMetaStore.write(accessToken, rootFolderId, meta, { knownFileId });
 }
 
 /**
- * Rebuild sync meta from Drive API (full scan).
+ * Rebuild sync meta from Drive API (full scan), keeping publish state and
+ * vault paths recorded on the previous entries.
  */
-export async function rebuildSyncMeta(
+export function rebuildSyncMeta(
   accessToken: string,
   rootFolderId: string
 ): Promise<SyncMeta> {
-  const existing = await readRemoteSyncMeta(accessToken, rootFolderId);
-  const files = await listUserFiles(accessToken, rootFolderId);
-  const meta: SyncMeta = {
-    lastUpdatedAt: new Date().toISOString(),
-    files: {},
-  };
-  for (const f of files) {
-    const prev = existing?.files[f.id];
-    meta.files[f.id] = {
-      name: f.name,
-      path: prev?.path,
-      mimeType: f.mimeType,
-      md5Checksum: f.md5Checksum ?? "",
-      modifiedTime: f.modifiedTime ?? "",
-      createdTime: f.createdTime,
-      shared: prev?.shared,
-      webViewLink: prev?.webViewLink,
-      publicPath: prev?.publicPath,
-      size: f.size ?? prev?.size,
-    };
-  }
-  await writeRemoteSyncMeta(accessToken, rootFolderId, meta);
-  return meta;
+  return syncMetaStore.rebuild(accessToken, rootFolderId) as Promise<SyncMeta>;
 }
 
 /**
  * Add or update a single file entry in remote meta.
  *
- * GemiHub keeps the publish state of a file (`shared`, `webViewLink`, the
- * signed `publicPath`) only inside `_sync-meta.json`; Drive itself does not
- * return it. Rebuilding the entry from the upload response alone therefore
- * un-publishes the file in GemiHub's tree on every push from Obsidian. Carry
- * those fields over from `previous` (defaults to the entry being replaced —
- * Full Push starts from an empty meta, so it passes the pre-push entry).
+ * Publish state (`shared`, `webViewLink`, `publicPath`) is carried over from
+ * `previous` (defaults to the entry being replaced — Full Push starts from an
+ * empty meta, so it passes the pre-push entry); see upsertDriveFileInMeta.
  */
 export function upsertFileInMeta(
   meta: SyncMeta,
@@ -186,24 +154,8 @@ export function upsertFileInMeta(
   vaultPath?: string,
   previous: FileSyncMeta | undefined = meta.files[file.id]
 ): void {
-  const entry: FileSyncMeta = {
-    name: file.name,
-    path: vaultPath,
-    mimeType: file.mimeType,
-    md5Checksum: file.md5Checksum ?? "",
-    modifiedTime: file.modifiedTime ?? "",
-    createdTime: file.createdTime ?? previous?.createdTime,
-  };
-  if (previous?.shared !== undefined) entry.shared = previous.shared;
-  if (previous?.webViewLink !== undefined) entry.webViewLink = previous.webViewLink;
-  if (previous?.publicPath !== undefined) entry.publicPath = previous.publicPath;
-  // Upload responses carry the new size; when they do not, the old size is
-  // only still right if the content did not change.
-  const size = file.size
-    ?? (previous && previous.md5Checksum === entry.md5Checksum ? previous.size : undefined);
-  if (size !== undefined) entry.size = size;
-  meta.files[file.id] = entry;
-  meta.lastUpdatedAt = new Date().toISOString();
+  const entry: FileSyncMeta = upsertDriveFileInMeta(meta, file, previous);
+  entry.path = vaultPath;
 }
 
 /**
@@ -213,8 +165,7 @@ export function removeFileFromMeta(
   meta: SyncMeta,
   fileId: string
 ): void {
-  delete meta.files[fileId];
-  meta.lastUpdatedAt = new Date().toISOString();
+  removeFilesFromMeta(meta, [fileId]);
 }
 
 export function getConflictBackupFolder(): string {

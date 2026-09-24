@@ -176,7 +176,7 @@ describe("resolveConflicts — keep remote", () => {
 
     expect(remoteMetaWrites(state)).toBe(0);
     // It is read exactly once for the whole batch, not once per file.
-    expect(state.countCalls("findFileByExactName")).toBe(1);
+    expect(state.countCalls("findFilesByExactName")).toBe(1);
     expect(state.calls.filter((c) => c.fn === "readFile" && c.args[1] === META_FILE_ID)).toHaveLength(1);
   });
 
@@ -484,7 +484,7 @@ describe("resolveConflicts — cost scales with batch size, not per file", () =>
     for (const n of [2, 20]) {
       const { manager, state } = setup(manyFiles(n));
       await manager.resolveConflicts(manager.conflicts.map((c) => c.fileId), "remote");
-      counts.push(state.countCalls("findFileByExactName"));
+      counts.push(state.countCalls("findFilesByExactName"));
     }
 
     // One metadata lookup per batch, whether it is 2 files or 20.

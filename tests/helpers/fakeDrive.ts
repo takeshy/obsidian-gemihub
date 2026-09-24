@@ -163,6 +163,10 @@ export function createFakeDrive() {
       return null;
     }),
 
+    findFilesByExactName: track("findFilesByExactName", (_t: string, name: string) =>
+      [...state.files.values()].filter((file) => file.name === name)
+    ),
+
     listFolders: track("listFolders", () => []),
   };
 }

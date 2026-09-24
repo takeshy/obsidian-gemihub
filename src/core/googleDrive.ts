@@ -83,6 +83,11 @@ export function findFileByExactName(accessToken: string, name: string, parentId?
   return drive.findFileByExactName(accessToken, name, parentId);
 }
 
+/** Every non-folder file with this exact name (duplicates included). */
+export function findFilesByExactName(accessToken: string, name: string, parentId?: string): Promise<DriveFile[]> {
+  return drive.findFilesByExactName(accessToken, name, parentId);
+}
+
 export function getFileMetadata(accessToken: string, fileId: string): Promise<DriveFile> {
   return drive.getFileMetadata(accessToken, fileId);
 }

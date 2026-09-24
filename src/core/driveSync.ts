@@ -22,7 +22,6 @@ import {
 } from "./googleDriveAuth";
 import { ensureRootFolder } from "./googleDrive";
 import * as drive from "./googleDrive";
-import { isDriveNotFoundError } from "gemihub-sync-core/drive";
 import {
   computeSyncDiff,
   type FileSyncMeta,
@@ -36,6 +35,7 @@ import {
   writeLocalSyncMeta,
   readRemoteSyncMeta,
   writeRemoteSyncMeta,
+  syncMetaStore,
   toLocalSyncMeta,
   upsertFileInMeta,
   removeFileFromMeta,
@@ -884,86 +884,45 @@ export class DriveSyncManager {
    *   a push interrupted between the upload and the metadata write) are adopted.
    *   Without this they stay invisible to pull while still showing up in the
    *   Drive listing, which permanently blocks push's pre-flight snapshot check.
+   * - Entries whose Drive file changed without a metadata update (another client
+   *   wrote the file, or a metadata write was lost) adopt the Drive state, so
+   *   the change surfaces as a pull/conflict instead of blocking push forever.
    * Writes corrected meta back to Drive if either side needed a change.
    */
   private async readReconciledRemoteMeta(
     accessToken: string,
     rootFolderId: string
   ): Promise<SyncMeta | null> {
-    const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
-    if (!remoteMeta) return null;
-
-    const driveFiles = await drive.listUserFiles(accessToken, rootFolderId);
-    const syncableFilesByPath = new Map<string, drive.DriveFile[]>();
     const caseInsensitivePaths = Platform.isWin || Platform.isMacOS || Platform.isIosApp;
-    for (const file of driveFiles) {
-      if (this.isExcludedPath(file.name) || isGoogleWorkspaceMimeType(file.mimeType)) continue;
-      // Drive permits case-distinct names, while Windows/macOS vaults usually
-      // resolve them to the same file. Treat those as duplicates too; otherwise
-      // every pull rediscovers the losing case variant as a remote-only file.
-      const normalizedPath = caseInsensitivePaths ? file.name.toLowerCase() : file.name;
-      const files = syncableFilesByPath.get(normalizedPath) ?? [];
-      files.push(file);
-      syncableFilesByPath.set(normalizedPath, files);
-    }
-    const duplicateGroups = [...syncableFilesByPath]
-      .filter(([, files]) => files.length > 1)
-      .map(([, files]) => ({ path: files[0].name, files }))
-      .sort((a, b) => a.path.localeCompare(b.path));
-    if (duplicateGroups.length > 0) {
-      throw new DuplicateRemoteFilesError(duplicateGroups);
-    }
-    const driveFileIds = new Set(driveFiles.map(f => f.id));
-    const staleIds = Object.keys(remoteMeta.files).filter(id => !driveFileIds.has(id));
-    const confirmedDeletedOrMovedIds: string[] = [];
-
-    // A file deleted in the Drive UI is usually still addressable by ID while
-    // it sits in Drive trash. listUserFiles() intentionally filters trashed
-    // files out, so verify every missing entry by ID before rewriting
-    // _sync-meta.json. Treat trashed files, permanently deleted files (404),
-    // and files moved outside the sync root as remote deletions for Obsidian.
-    // This makes pull previews show those deletions instead of silently
-    // keeping stale metadata.
-    for (const id of staleIds) {
-      try {
-        const file = await drive.getFileMetadata(accessToken, id);
-        if (file.trashed || !(file.parents ?? []).includes(rootFolderId)) {
-          confirmedDeletedOrMovedIds.push(id);
+    // Stale entries are verified by ID (Drive trash, permanent delete, moved out
+    // of the root), drifted entries adopt the Drive state, and untracked files
+    // are adopted — the rules shared with GemiHub web and Desktop.
+    const { meta } = await syncMetaStore.readReconciled(accessToken, rootFolderId, {
+      rebuildIfMissing: false,
+      // Excluded names are owned by another tool and must not become pull candidates.
+      isAdoptable: (file) => !this.isExcludedPath(file.name),
+      onListing: (driveFiles) => {
+        const syncableFilesByPath = new Map<string, drive.DriveFile[]>();
+        for (const file of driveFiles) {
+          if (this.isExcludedPath(file.name) || isGoogleWorkspaceMimeType(file.mimeType)) continue;
+          // Drive permits case-distinct names, while Windows/macOS vaults usually
+          // resolve them to the same file. Treat those as duplicates too; otherwise
+          // every pull rediscovers the losing case variant as a remote-only file.
+          const normalizedPath = caseInsensitivePaths ? file.name.toLowerCase() : file.name;
+          const files = syncableFilesByPath.get(normalizedPath) ?? [];
+          files.push(file);
+          syncableFilesByPath.set(normalizedPath, files);
         }
-      } catch (err) {
-        if (isDriveNotFoundError(err)) {
-          confirmedDeletedOrMovedIds.push(id);
-        } else {
-          throw err;
+        const duplicateGroups = [...syncableFilesByPath]
+          .filter(([, files]) => files.length > 1)
+          .map(([, files]) => ({ path: files[0].name, files }))
+          .sort((a, b) => a.path.localeCompare(b.path));
+        if (duplicateGroups.length > 0) {
+          throw new DuplicateRemoteFilesError(duplicateGroups);
         }
-      }
-    }
-
-    // Adopt untracked Drive files so they surface as ordinary remote additions.
-    // Excluded names are skipped: they are owned by another tool and must not
-    // become pull candidates.
-    const adoptedIds: string[] = [];
-    for (const file of driveFiles) {
-      if (remoteMeta.files[file.id]) continue;
-      if (this.isExcludedPath(file.name)) continue;
-      remoteMeta.files[file.id] = {
-        name: file.name,
-        mimeType: file.mimeType,
-        md5Checksum: file.md5Checksum ?? "",
-        modifiedTime: file.modifiedTime ?? "",
-        createdTime: file.createdTime,
-      };
-      adoptedIds.push(file.id);
-    }
-
-    if (confirmedDeletedOrMovedIds.length > 0 || adoptedIds.length > 0) {
-      for (const id of confirmedDeletedOrMovedIds) {
-        delete remoteMeta.files[id];
-      }
-      remoteMeta.lastUpdatedAt = new Date().toISOString();
-      await writeRemoteSyncMeta(accessToken, rootFolderId, remoteMeta);
-    }
-    return remoteMeta;
+      },
+    });
+    return meta as SyncMeta | null;
   }
 
   /** Keep one Drive file for each duplicate path and move the others to trash/. */
