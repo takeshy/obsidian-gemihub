@@ -29,6 +29,7 @@ import {
   type SyncDiff,
   type ConflictInfo,
 } from "./syncDiff";
+import { syncMetaSnapshotChanged } from "gemihub-sync-core/protocol";
 import {
   readLocalSyncMeta,
   writeLocalSyncMeta,
@@ -167,18 +168,17 @@ function remoteSnapshotChanged(
   currentFiles: drive.DriveFile[],
   isExcluded: (path: string) => boolean,
 ): boolean {
-  const expectedFiles = Object.entries(expected?.files ?? {})
-    .filter(([, file]) => !isGoogleWorkspaceMimeType(file.mimeType) && !isExcluded(file.name));
-  const current = currentFiles
-    .filter((file) => !isGoogleWorkspaceMimeType(file.mimeType) && !isExcluded(file.name));
-  if (expectedFiles.length !== current.length) return true;
-  const currentById = new Map(current.map((file) => [file.id, file]));
-  return expectedFiles.some(([id, before]) => {
-    const after = currentById.get(id);
-    if (!after || before.name !== after.name) return true;
-    if (before.md5Checksum && after.md5Checksum) return before.md5Checksum !== after.md5Checksum;
-    return before.modifiedTime !== (after.modifiedTime ?? "");
-  });
+  const syncable = (file: { name: string; mimeType: string }) =>
+    !isGoogleWorkspaceMimeType(file.mimeType) && !isExcluded(file.name);
+  const before = Object.fromEntries(
+    Object.entries(expected?.files ?? {}).filter(([, file]) => syncable(file)),
+  );
+  const after = Object.fromEntries(currentFiles.filter(syncable).map((file) => [file.id, {
+    name: file.name,
+    md5Checksum: file.md5Checksum ?? "",
+    modifiedTime: file.modifiedTime ?? "",
+  }]));
+  return syncMetaSnapshotChanged(before, after);
 }
 
 /**

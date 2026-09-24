@@ -1,176 +1,45 @@
 // Sync utility functions for Google Drive sync.
-// Ported from GemiHub's sync-client-utils.ts with Obsidian-specific additions.
+// Exclusion and file type rules come from gemihub-sync-core (shared with
+// GemiHub web and Desktop); only the Obsidian-specific folders live here.
 
+import {
+  isSyncExcludedPath as isCoreSyncExcludedPath,
+  SYNC_EXCLUDED_PREFIXES as CORE_SYNC_EXCLUDED_PREFIXES,
+} from "gemihub-sync-core/paths";
+import { guessMimeType, shouldTreatAsBinaryFile } from "gemihub-sync-core/files";
 import { WORKSPACE_FOLDER } from "../types";
 
-export const SYNC_EXCLUDED_FILE_NAMES = new Set(["_sync-meta.json", "_encrypted-auth.json", "settings.json"]);
-// Note: ".obsidian/" is handled dynamically via Vault.configDir in isSyncExcludedPath
-export const SYNC_EXCLUDED_PREFIXES = [
-  "history/",
-  "trash/",
-  "sync_conflicts/",
-  "__TEMP__/",
-  "plugins/",
-  ".trash/",
-  "node_modules/",
-];
+export { SYNC_EXCLUDED_FILE_NAMES, isGoogleWorkspaceMimeType } from "gemihub-sync-core/paths";
+export { isBinaryMimeType, looksLikeBinary } from "gemihub-sync-core/files";
+
+/** Shared system folders plus Obsidian's own trash folder. */
+export const SYNC_EXCLUDED_PREFIXES = [...CORE_SYNC_EXCLUDED_PREFIXES, ".trash/"];
 
 export function isSyncExcludedPath(filePath: string, userExcludePatterns: string[] = [], configDir?: string): boolean {
-  const normalized = filePath.replace(/^\/+/, "");
-  if (SYNC_EXCLUDED_FILE_NAMES.has(normalized)) return true;
-  if (SYNC_EXCLUDED_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return true;
-  // Exclude Obsidian config directory (configurable via Vault.configDir)
-  if (configDir && (normalized.startsWith(configDir + "/") || normalized === configDir)) return true;
-  // Exclude plugin workspace folder (chat history, sync meta, etc.)
-  if (normalized.startsWith(WORKSPACE_FOLDER + "/") || normalized === WORKSPACE_FOLDER) return true;
-  // User-defined exclude patterns
-  for (const pattern of userExcludePatterns) {
-    const trimmed = pattern.trim();
-    if (!trimmed) continue;
-    // Support folder patterns (ending with /) — match exact folder prefix
-    if (trimmed.endsWith("/")) {
-      const folderWithoutSlash = trimmed.slice(0, -1);
-      if (normalized.startsWith(trimmed) || normalized === folderWithoutSlash) return true;
-    } else {
-      // Simple glob-like matching: * matches any characters, ? matches single character
-      // Escape regex metacharacters first, then convert glob wildcards
-      const escaped = trimmed
-        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-        .replace(/\*/g, ".*")
-        .replace(/\?/g, ".");
-      const regex = new RegExp("^" + escaped + "$");
-      if (regex.test(normalized) || regex.test(normalized.split("/").pop() ?? "")) return true;
-    }
-  }
-  return false;
+  return isCoreSyncExcludedPath(filePath, {
+    excludePatterns: userExcludePatterns,
+    extraPrefixes: [
+      ".trash/",
+      // Plugin workspace folder (chat history, sync meta, conflict backups)
+      `${WORKSPACE_FOLDER}/`,
+      // Obsidian config directory (configurable via Vault.configDir)
+      ...(configDir ? [`${configDir}/`] : []),
+    ],
+  });
 }
 
-const BINARY_APPLICATION_TYPES = new Set([
-  "application/pdf",
-  "application/zip",
-  "application/gzip",
-  "application/x-tar",
-  "application/x-gzip",
-  "application/x-bzip2",
-  "application/x-7z-compressed",
-  "application/x-rar-compressed",
-  "application/octet-stream",
-  "application/wasm",
-]);
-
-const BINARY_APPLICATION_PREFIXES = [
-  "application/vnd.openxmlformats-",
-  "application/vnd.ms-",
-  "application/vnd.oasis.opendocument.",
-];
-
-export function isBinaryMimeType(mimeType: string | undefined | null): boolean {
-  if (!mimeType) return false;
-  if (
-    mimeType.startsWith("image/") ||
-    mimeType.startsWith("video/") ||
-    mimeType.startsWith("audio/") ||
-    mimeType.startsWith("font/")
-  ) return true;
-  if (BINARY_APPLICATION_TYPES.has(mimeType)) return true;
-  return BINARY_APPLICATION_PREFIXES.some((p) => mimeType.startsWith(p));
-}
-
-export function isGoogleWorkspaceMimeType(mimeType: string | undefined | null): boolean {
-  return Boolean(mimeType?.startsWith("application/vnd.google-apps."));
-}
-
-export function looksLikeBinary(content: string): boolean {
-  const sample = content.slice(0, 512);
-  if (sample.length === 0) return false;
-  let controlCount = 0;
-  for (let i = 0; i < sample.length; i++) {
-    const code = sample.charCodeAt(i);
-    if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
-      controlCount++;
-    }
-  }
-  return controlCount / sample.length >= 0.1;
-}
-
-// MIME type detection from file extension
-const MIME_TYPE_MAP: Record<string, string> = {
-  // Text
-  md: "text/markdown",
-  txt: "text/plain",
-  html: "text/html",
-  htm: "text/html",
-  css: "text/css",
-  js: "application/javascript",
-  ts: "application/typescript",
-  json: "application/json",
-  desktop: "application/json",
-  workflow: "application/yaml",
-  canvas: "application/json",
-  base: "application/json",
-  xml: "application/xml",
-  yaml: "text/yaml",
-  yml: "text/yaml",
-  csv: "text/csv",
-  svg: "image/svg+xml",
-  // Images
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  bmp: "image/bmp",
-  ico: "image/x-icon",
-  // Documents
-  pdf: "application/pdf",
-  doc: "application/msword",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  xls: "application/vnd.ms-excel",
-  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  // Archives
-  zip: "application/zip",
-  gz: "application/gzip",
-  tar: "application/x-tar",
-  // Audio/Video
-  mp3: "audio/mpeg",
-  mp4: "video/mp4",
-  wav: "audio/wav",
-  ogg: "audio/ogg",
-  webm: "video/webm",
-  // Fonts
-  woff: "font/woff",
-  woff2: "font/woff2",
-  ttf: "font/ttf",
-  otf: "font/otf",
-};
-
-const BINARY_EXTENSIONS = new Set([
-  "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg",
-  "pdf", "doc", "docx", "xls", "xlsx", "pptx",
-  "zip", "gz", "tar", "7z", "rar",
-  "mp3", "mp4", "wav", "ogg", "webm",
-  "woff", "woff2", "ttf", "otf",
-  "exe", "dll", "so", "dylib",
-]);
-
+/** MIME type for a vault path (shared table). */
 export function getMimeType(filePath: string): string {
-  const name = filePath.toLowerCase().split("/").pop() || "";
-  const dotIndex = name.lastIndexOf(".");
-  if (dotIndex <= 0) return "text/plain"; // extensionless files (Makefile, LICENSE, etc.)
-  const ext = name.substring(dotIndex + 1);
-  return MIME_TYPE_MAP[ext] || "application/octet-stream";
+  return guessMimeType(filePath);
 }
 
+/**
+ * Whether a vault file is synced as binary. Unknown extensions are binary:
+ * decoding arbitrary bytes as UTF-8 and writing them back as text can
+ * irreversibly corrupt the file.
+ */
 export function isBinaryExtension(filePath: string): boolean {
-  const name = filePath.toLowerCase().split("/").pop() || "";
-  const dotIndex = name.lastIndexOf(".");
-  if (dotIndex <= 0) return false; // extensionless files are text
-  const ext = name.substring(dotIndex + 1);
-  // Unknown extensions resolve to application/octet-stream in getMimeType().
-  // Treat those as binary by default: decoding arbitrary bytes as UTF-8 and
-  // writing them back as text can irreversibly corrupt the file.
-  return BINARY_EXTENSIONS.has(ext) || isBinaryMimeType(getMimeType(filePath));
+  return shouldTreatAsBinaryFile(filePath);
 }
 
 // ========================================

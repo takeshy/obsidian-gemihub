@@ -5,6 +5,10 @@
 import type { App } from "obsidian";
 import { WORKSPACE_FOLDER } from "../types";
 import {
+  buildConflictBackupName as buildCoreConflictBackupName,
+  parseConflictBackupName,
+} from "gemihub-sync-core/conflict";
+import {
   listUserFiles,
   readFile,
   createFile,
@@ -263,16 +267,9 @@ export async function saveConflictBackup(
   }
 }
 
+/** Shared backup name format (see gemihub-sync-core/conflict). */
 export function buildConflictBackupName(filePath: string, now: Date = new Date()): string {
-  const iso = now.toISOString();
-  const ts = iso.replace(/[-:]/g, "").replace("T", "_").slice(0, 15)
-    + "_" + iso.slice(20, 23);
-  const encodedPath = encodeURIComponent(filePath);
-  const dotIdx = encodedPath.lastIndexOf(".");
-  const backupName = dotIdx > 0
-    ? `${encodedPath.slice(0, dotIdx)}_${ts}${encodedPath.slice(dotIdx)}`
-    : `${encodedPath}_${ts}`;
-  return backupName;
+  return buildCoreConflictBackupName(filePath, now);
 }
 
 export function restorePathFromConflictBackupName(name: string): string {
@@ -283,15 +280,9 @@ export function restorePathFromConflictBackupName(name: string): string {
   }
 }
 
+/** Original vault path of a backup, from any GemiHub client's name format. */
 export function restoreOriginalPathFromConflictBackupName(name: string): string {
-  // Accept both legacy second-resolution names and current millisecond names.
-  const match = name.match(/^(.+)_(\d{8}_\d{6})(?:_\d{3})?(\.[^.]+)?$/);
-  const baseName = match ? match[1] + (match[3] ?? "") : name;
-  try {
-    return decodeURIComponent(baseName);
-  } catch {
-    return baseName;
-  }
+  return parseConflictBackupName(name).originalPath;
 }
 
 /**

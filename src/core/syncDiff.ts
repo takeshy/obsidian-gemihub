@@ -1,20 +1,16 @@
-// Pure sync diff types and computation — shared between server and client.
-// Ported from GemiHub's sync-diff.ts with path support for Obsidian Vault sync.
+// Sync diff types and computation. The protocol lives in gemihub-sync-core so
+// Obsidian, GemiHub web and GemiHub Desktop apply identical rules; this module
+// only adds the Obsidian-specific fields.
 
-export const SYNC_META_FILE_NAME = "_sync-meta.json";
+import {
+  computeSyncDiff as computeCoreSyncDiff,
+  type FileSyncMeta as CoreFileSyncMeta,
+} from "gemihub-sync-core/protocol";
 
-export interface FileSyncMeta {
-  name: string;
+export { SYNC_META_FILE_NAME } from "gemihub-sync-core/protocol";
+
+export interface FileSyncMeta extends CoreFileSyncMeta {
   path?: string;        // Vault relative path (Obsidian extension)
-  mimeType: string;
-  md5Checksum: string;
-  modifiedTime: string;
-  createdTime?: string;
-  shared?: boolean;
-  webViewLink?: string;
-  /** Signed origin-relative public link minted by GemiHub (published files only). */
-  publicPath?: string;
-  size?: string;
 }
 
 export interface SyncMeta {
@@ -44,72 +40,11 @@ export interface SyncDiff {
 /** Minimal shape accepted as localMeta */
 type SyncMetaLike = { files: Record<string, { md5Checksum: string; modifiedTime: string; name?: string }> } | null;
 
-/**
- * Compute sync diff by comparing two metadata snapshots.
- * Ported from GemiHub's computeSyncDiff.
- */
+/** Compute sync diff by comparing two metadata snapshots (see gemihub-sync-core). */
 export function computeSyncDiff(
   localMeta: SyncMetaLike,
   remoteMeta: SyncMeta | null,
   locallyModifiedFileIds: Set<string> = new Set()
 ): SyncDiff {
-  const localFiles = localMeta?.files ?? {};
-  const remoteFiles = remoteMeta?.files ?? {};
-
-  const SYSTEM_FILE_NAMES = new Set([SYNC_META_FILE_NAME, "settings.json"]);
-
-  const toPush: string[] = [];
-  const toPull: string[] = [];
-  const conflicts: ConflictInfo[] = [];
-  const editDeleteConflicts: string[] = [];
-  const localOnly: string[] = [];
-  const remoteOnly: string[] = [];
-
-  // Collect all known file IDs
-  const allFileIds = new Set<string>();
-  for (const id of Object.keys(localFiles)) allFileIds.add(id);
-  for (const [id, f] of Object.entries(remoteFiles)) {
-    if (!SYSTEM_FILE_NAMES.has(f.name)) allFileIds.add(id);
-  }
-  for (const id of locallyModifiedFileIds) allFileIds.add(id);
-
-  for (const fileId of allFileIds) {
-    const local = localFiles[fileId];
-    const remote = remoteFiles[fileId];
-    const locallyModified = locallyModifiedFileIds.has(fileId);
-    const hasLocal = !!local || locallyModified;
-    const hasRemote = !!remote;
-
-    const localChanged = locallyModified;
-    const remoteChanged = local && remote
-      ? local.md5Checksum !== remote.md5Checksum
-        || (local.name !== undefined && local.name !== remote.name
-            && local.name.toLowerCase() !== remote.name.toLowerCase())
-      : false;
-
-    if (hasLocal && !hasRemote) {
-      if (locallyModified && local) {
-        editDeleteConflicts.push(fileId);
-      } else {
-        localOnly.push(fileId);
-      }
-    } else if (!hasLocal && hasRemote) {
-      remoteOnly.push(fileId);
-    } else if (localChanged && remoteChanged) {
-      conflicts.push({
-        fileId,
-        fileName: remote?.name ?? fileId,
-        localChecksum: local?.md5Checksum ?? "",
-        remoteChecksum: remote?.md5Checksum ?? "",
-        localModifiedTime: local?.modifiedTime ?? "",
-        remoteModifiedTime: remote?.modifiedTime ?? "",
-      });
-    } else if (localChanged) {
-      toPush.push(fileId);
-    } else if (remoteChanged) {
-      toPull.push(fileId);
-    }
-  }
-
-  return { toPush, toPull, conflicts, editDeleteConflicts, localOnly, remoteOnly };
+  return computeCoreSyncDiff(localMeta, remoteMeta, locallyModifiedFileIds);
 }
