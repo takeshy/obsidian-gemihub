@@ -215,6 +215,11 @@ Drive 上に `_sync-meta.json` が存在しません。**Push to drive** を実�
 
 両方に変更があります。各ファイルについてローカルまたはリモートを選択し、すべてのコンフリクトを解決してください。全コンフリクト解決後、Pull が自動的に続行されます。
 
+## 関連リポジトリ
+
+- [GemiHub](https://gemihub.net) — このプラグインの同期先となる Web アプリ
+- [gemihub-sync-core](https://github.com/takeshy/gemihub-sync-core) — このプラグイン、GemiHub、GemiHub Desktop プラグインが共通で使う同期ライブラリ。`_sync-meta.json` のプロトコルと読み書き、Google Drive REST クライアント、同期除外とファイル種別の判定、コンフリクトバックアップの命名、暗号化と外部同期の認証情報を提供します。上記の同期の挙動はこのライブラリによるもので、同じ Drive フォルダをすべてのクライアントが同じ規則で扱います。
+
 ## ライセンス
 
 MIT

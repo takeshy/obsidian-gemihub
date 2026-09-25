@@ -215,6 +215,11 @@ No `_sync-meta.json` exists on Drive. Run **Push to drive** to initialize sync.
 
 Both sides have changes. Resolve all conflicts by choosing local or remote for each file. After resolving all conflicts, pull continues automatically.
 
+## Related Repositories
+
+- [GemiHub](https://gemihub.net) — the web app this plugin syncs with
+- [gemihub-sync-core](https://github.com/takeshy/gemihub-sync-core) — shared sync library used by this plugin, GemiHub and the GemiHub Desktop plugin: `_sync-meta.json` protocol and storage, Google Drive REST client, sync exclusion and file type rules, conflict backup names, and encryption / external sync credentials. The sync behavior described above comes from this library, so all clients handle the same Drive folder identically.
+
 ## License
 
 MIT
