@@ -103,16 +103,18 @@ export const syncMetaStore = createSyncMetaStore({
   getFileMetadata: (token, id) => getFileMetadata(token, id),
 });
 
-export async function readRemoteSyncMeta(
+/**
+ * Current remote registry; null only when it is missing or malformed.
+ *
+ * Read failures (network, 5xx) are thrown, never reported as null: callers
+ * treat null as "no registry yet" and write a fresh one, which would replace
+ * the real registry with a near-empty copy.
+ */
+export function readRemoteSyncMeta(
   accessToken: string,
   rootFolderId: string
 ): Promise<SyncMeta | null> {
-  try {
-    return await syncMetaStore.read(accessToken, rootFolderId);
-  } catch (err) {
-    console.error("[DriveSync] Failed to read remote sync meta:", err);
-    return null;
-  }
+  return syncMetaStore.read(accessToken, rootFolderId) as Promise<SyncMeta | null>;
 }
 
 /**
