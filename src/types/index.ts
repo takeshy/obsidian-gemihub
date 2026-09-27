@@ -5,6 +5,7 @@ export const WORKSPACE_FOLDER = "GemiHub";
 export interface DriveSyncSettings {
   enabled: boolean;
   encryptedAuth: DriveEncryptedAuth | null;
+  passwordSecretId: string;
   excludePatterns: string[];
   autoSync: boolean;
   syncIntervalMinutes: number;
@@ -29,6 +30,7 @@ export interface DriveSessionTokens {
 export const DEFAULT_DRIVE_SYNC_SETTINGS: DriveSyncSettings = {
   enabled: false,
   encryptedAuth: null,
+  passwordSecretId: "",
   excludePatterns: ["node_modules/", ".*"],
   autoSync: false,
   syncIntervalMinutes: 5,

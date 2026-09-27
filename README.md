@@ -59,7 +59,7 @@ You need a [GemiHub](https://gemihub.net) account with Google Drive sync configu
 
 ![Drive Sync Unlock](docs/images/gemihub_connection/start_with_sync.png)
 
-> On each Obsidian restart, you will be prompted to enter your password to unlock the sync session.
+> Requires Obsidian 1.11.4 or later. To unlock automatically after restarting, select or create a secret containing your GemiHub password under **Password in Secret Storage** in the plugin settings. Only the secret name is saved in plugin settings. Configure the secret on each device; clear the selection to return to manual entry. If the secret is missing or unlock fails, the password prompt appears. Resetting auth clears the selection but leaves the secret in Obsidian's Secret Storage.
 
 ## How Sync Works
 

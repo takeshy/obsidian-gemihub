@@ -1,7 +1,6 @@
-import { Setting, Notice } from "obsidian";
+import { Setting, Notice, SecretComponent } from "obsidian";
 import { t } from "src/i18n";
 import { ConfirmModal } from "src/ui/components/ConfirmModal";
-import { DriveAuthPasswordModal } from "src/ui/components/DriveAuthPasswordModal";
 import { DriveTrashModal } from "src/ui/components/DriveTrashModal";
 import { DriveConflictBackupModal } from "src/ui/components/DriveConflictBackupModal";
 import { DriveTempFilesModal } from "src/ui/components/DriveTempFilesModal";
@@ -33,6 +32,16 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
     );
 
   if (!driveSync.enabled) return;
+
+  new Setting(containerEl)
+    .setName(t("driveSync.passwordSecret"))
+    .setDesc(t("driveSync.passwordSecretDesc"))
+    .addComponent((el) => new SecretComponent(app, el)
+      .setValue(driveSync.passwordSecretId)
+      .onChange(async (value) => {
+        plugin.settings.driveSync.passwordSecretId = value;
+        await plugin.saveSettings();
+      }));
 
   // Setup / Connection status
   if (!driveSync.encryptedAuth) {
@@ -96,6 +105,7 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
               ).openAndWait();
               if (!confirmed) return;
               plugin.settings.driveSync.encryptedAuth = null;
+              plugin.settings.driveSync.passwordSecretId = "";
               await plugin.saveSettings();
               syncManager?.lock();
               display();
@@ -113,17 +123,8 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
             .setCta()
             .onClick(() => {
               void (async () => {
-                const modal = new DriveAuthPasswordModal(app);
-                const password = await modal.openAndWait();
-                if (!password) return;
-                try {
-                  if (!syncManager) throw new Error("Drive sync not initialized");
-                  await syncManager.unlockWithPassword(password);
-                  new Notice(t("driveSync.unlocked"));
-                  display();
-                } catch (err) {
-                  new Notice(t("driveSync.unlockFailed", { error: formatError(err) }));
-                }
+                await plugin.promptDriveSyncUnlock();
+                display();
               })();
             })
         )
@@ -138,6 +139,7 @@ export function displayDriveSyncSettings(containerEl: HTMLElement, ctx: Settings
               ).openAndWait();
               if (!confirmed) return;
               plugin.settings.driveSync.encryptedAuth = null;
+              plugin.settings.driveSync.passwordSecretId = "";
               await plugin.saveSettings();
               syncManager?.lock();
               display();

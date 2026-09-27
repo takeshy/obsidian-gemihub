@@ -13,6 +13,7 @@ export class DriveSyncUIManager {
   private statusBarEl: HTMLElement | null = null;
   private pushRibbonEl: HTMLElement | null = null;
   private pullRibbonEl: HTMLElement | null = null;
+  private unlockPromise: Promise<void> | null = null;
 
   constructor(plugin: GemiHubPlugin) {
     this.plugin = plugin;
@@ -26,6 +27,34 @@ export class DriveSyncUIManager {
    * Prompt user for password to unlock Drive sync session.
    */
   async promptDriveSyncUnlock(): Promise<void> {
+    if (this.unlockPromise) return this.unlockPromise;
+    this.unlockPromise = this.unlockDriveSync();
+    try {
+      await this.unlockPromise;
+    } finally {
+      this.unlockPromise = null;
+    }
+  }
+
+  private async unlockDriveSync(): Promise<void> {
+    const mgr = this.mgr;
+    if (!mgr?.isConfigured || mgr.isUnlocked) return;
+
+    const secretId = this.plugin.settings.driveSync.passwordSecretId;
+    if (secretId) {
+      try {
+        const password = this.plugin.app.secretStorage.getSecret(secretId);
+        if (password) {
+          await mgr.unlockWithPassword(password);
+          this.updateStatusBar();
+          return;
+        }
+      } catch {
+        mgr.lock();
+        new Notice(t("driveSync.secretUnlockFailed"));
+      }
+    }
+
     while (this.mgr?.isConfigured && !this.mgr.isUnlocked) {
       const modal = new DriveAuthPasswordModal(this.plugin.app);
       const password = await modal.openAndWait();

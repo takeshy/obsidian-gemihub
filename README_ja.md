@@ -59,7 +59,7 @@ Obsidian の Vault を Google Drive と同期し、[GemiHub](https://gemihub.net
 
 ![Drive Sync のアンロック](docs/images/gemihub_connection/start_with_sync.png)
 
-> Obsidian を再起動するたびに、同期セッションをアンロックするためのパスワード入力が求められます。
+> Obsidian 1.11.4 以上が必要です。再起動時に自動でロック解除するには、プラグイン設定の **Secret Storage のパスワード** で、GemiHub のパスワードを保存したシークレットを選択・作成してください。プラグイン設定にはシークレット名のみ保存します。シークレットは各端末で設定してください。選択を解除すると手入力に戻ります。保存値がない場合やロック解除に失敗した場合は入力画面が開きます。認証のリセットでは選択を解除しますが、Obsidian の Secret Storage 内のシークレットは削除しません。
 
 ## 同期の仕組み
 
