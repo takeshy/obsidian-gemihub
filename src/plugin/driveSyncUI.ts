@@ -57,18 +57,33 @@ export class DriveSyncUIManager {
 
     while (this.mgr?.isConfigured && !this.mgr.isUnlocked) {
       const modal = new DriveAuthPasswordModal(this.plugin.app);
-      const password = await modal.openAndWait();
-      if (!password) return; // User skipped/cancelled
+      const result = await modal.openAndWait();
+      if (!result) return; // User skipped/cancelled
 
       try {
-        await this.mgr.unlockWithPassword(password);
+        await this.mgr.unlockWithPassword(result.password);
         new Notice(t("driveSync.unlocked"));
         this.updateStatusBar();
-        return;
       } catch (err) {
+        this.mgr.lock();
         console.error("Drive sync unlock failed:", formatError(err));
         new Notice(t("driveSync.unlockFailed", { error: formatError(err) }));
+        continue;
       }
+
+      if (result.savePassword) {
+        const previousId = this.plugin.settings.driveSync.passwordSecretId;
+        try {
+          const id = previousId || `gemihub-drive-password-${crypto.randomUUID()}`;
+          this.plugin.app.secretStorage.setSecret(id, result.password);
+          this.plugin.settings.driveSync.passwordSecretId = id;
+          await this.plugin.saveSettings();
+        } catch {
+          this.plugin.settings.driveSync.passwordSecretId = previousId;
+          new Notice(t("driveSync.secretSaveFailed"));
+        }
+      }
+      return;
     }
   }
 

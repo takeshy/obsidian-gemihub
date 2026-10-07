@@ -23,6 +23,7 @@ export class DriveSyncDiffModal extends Modal {
   private resolve: ((result: { confirmed: boolean; ignoredIds?: Set<string> }) => void) | null = null;
   private diffStates: Record<string, DiffState> = {};
   private ignoredIds: Set<string> = new Set();
+  private restoring = false;
   private headerTitleEl: HTMLElement | null = null;
 
   // Drag state
@@ -161,22 +162,23 @@ export class DriveSyncDiffModal extends Modal {
       tagEl.setText(t("driveSync.conflictNeedResolve"));
     }
 
-    // Action button: "Restore" for push-side deletions (pulls the Drive copy
-    // back into the vault to recover from an accidental local delete);
-    // otherwise "Open" when the file exists locally.
-    const isPushDelete = this.direction === "push" && file.type === "deleted";
-    const hasLocal = !(file.type === "new" && this.direction === "pull");
-    if (isPushDelete) {
+    const canRestore = this.direction === "push"
+      && ["new", "modified", "deleted", "renamed"].includes(file.type);
+    const hasLocal = !(file.type === "deleted" && this.direction === "push")
+      && !(file.type === "new" && this.direction === "pull");
+    if (canRestore) {
       const restoreBtn = headerEl.createEl("button", { cls: "gemihub-sync-diff-toggle" });
+      restoreBtn.title = file.type === "new" ? t("driveSync.restoreNewTooltip") : t("driveSync.restoreLocalTooltip");
       const restoreIconEl = restoreBtn.createSpan();
       setIcon(restoreIconEl, "rotate-ccw");
       const restoreLabel = restoreBtn.createSpan();
       restoreLabel.setText(t("driveSync.restore"));
       restoreBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        void this.handleRestore(file, itemEl, restoreBtn);
+        void this.handleRestore(file, itemEl);
       });
-    } else if (hasLocal) {
+    }
+    if (hasLocal) {
       const openBtn = headerEl.createEl("button", { cls: "gemihub-sync-diff-toggle" });
       const openIconEl = openBtn.createSpan();
       setIcon(openIconEl, "external-link");
@@ -249,11 +251,13 @@ export class DriveSyncDiffModal extends Modal {
   private async handleRestore(
     file: SyncFileListItem,
     itemEl: HTMLElement,
-    restoreBtn: HTMLButtonElement,
   ): Promise<void> {
-    restoreBtn.disabled = true;
+    if (this.restoring) return;
+    this.restoring = true;
+    const buttons = Array.from(this.contentEl.querySelectorAll<HTMLButtonElement>("button"));
+    for (const button of buttons) button.disabled = true;
     try {
-      await this.syncManager.restoreDeletedLocally(file.id);
+      await this.syncManager.restoreLocalChange(file);
       this.files = this.files.filter((f) => f.id !== file.id);
       this.diffStates[file.id]?.diffRenderer?.destroy();
       delete this.diffStates[file.id];
@@ -266,8 +270,10 @@ export class DriveSyncDiffModal extends Modal {
         resolve?.({ confirmed: false });
       }
     } catch (err) {
-      restoreBtn.disabled = false;
       new Notice(t("driveSync.restoreFailed", { name: file.name, error: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      this.restoring = false;
+      for (const button of buttons) button.disabled = false;
     }
   }
 
@@ -348,6 +354,7 @@ export class DriveSyncDiffModal extends Modal {
         newContent = this.direction === "push" ? localContent : remoteContent;
       }
 
+      if (!this.diffStates[file.id]) return;
       panel.empty();
 
       // Render toggle + diff view

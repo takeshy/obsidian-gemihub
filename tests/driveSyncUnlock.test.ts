@@ -18,11 +18,12 @@ function setup(secretId = "gemihub-password") {
   };
   const getSecret = vi.fn<() => string | null>(() => "saved-password");
   const plugin = {
-    app: { secretStorage: { getSecret } },
+    app: { secretStorage: { getSecret, setSecret: vi.fn() } },
+    saveSettings: vi.fn(async () => undefined),
     settings: { driveSync: { passwordSecretId: secretId } },
     driveSyncManager: mgr,
   } as unknown as GemiHubPlugin;
-  return { mgr, getSecret, ui: new DriveSyncUIManager(plugin) };
+  return { mgr, getSecret, plugin, ui: new DriveSyncUIManager(plugin) };
 }
 
 beforeEach(() => {
@@ -40,7 +41,7 @@ describe("Drive sync Secret Storage unlock", () => {
 
   it("uses manual entry when no secret is selected", async () => {
     const { ui, mgr, getSecret } = setup("");
-    prompt.mockResolvedValueOnce("manual-password");
+    prompt.mockResolvedValueOnce({ password: "manual-password", savePassword: false });
     await ui.promptDriveSyncUnlock();
     expect(getSecret).not.toHaveBeenCalled();
     expect(mgr.unlockWithPassword).toHaveBeenCalledWith("manual-password");
@@ -60,7 +61,7 @@ describe("Drive sync Secret Storage unlock", () => {
       mgr.isUnlocked = true;
       throw new Error("Unlock failed after obtaining tokens");
     });
-    prompt.mockResolvedValueOnce("corrected-password");
+    prompt.mockResolvedValueOnce({ password: "corrected-password", savePassword: false });
     await ui.promptDriveSyncUnlock();
     expect(mgr.lock).toHaveBeenCalledOnce();
     expect(mgr.unlockWithPassword.mock.calls).toEqual([["saved-password"], ["corrected-password"]]);
@@ -90,4 +91,56 @@ describe("Drive sync Secret Storage unlock", () => {
     expect(getSecret).not.toHaveBeenCalled();
     expect(prompt).not.toHaveBeenCalled();
   });
+
+  it("stores a verified password and automatically unlocks next time", async () => {
+    const { ui, mgr, plugin, getSecret } = setup("");
+    prompt.mockResolvedValueOnce({ password: "verified-password", savePassword: true });
+    await ui.promptDriveSyncUnlock();
+    const id = plugin.settings.driveSync.passwordSecretId;
+    expect(id).toMatch(/^gemihub-drive-password-/);
+    expect(plugin.app.secretStorage.setSecret).toHaveBeenCalledWith(id, "verified-password");
+    expect(plugin.saveSettings).toHaveBeenCalledOnce();
+    expect(JSON.stringify(plugin.settings)).not.toContain("verified-password");
+    mgr.isUnlocked = false;
+    getSecret.mockReturnValue("verified-password");
+    await ui.promptDriveSyncUnlock();
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(mgr.unlockWithPassword).toHaveBeenLastCalledWith("verified-password");
+  });
+
+  it("does not save when the user opts out", async () => {
+    const { ui, plugin } = setup("");
+    prompt.mockResolvedValueOnce({ password: "manual-password", savePassword: false });
+    await ui.promptDriveSyncUnlock();
+    expect(plugin.app.secretStorage.setSecret).not.toHaveBeenCalled();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("does not store a password that fails authentication", async () => {
+    const { ui, mgr, plugin } = setup("");
+    mgr.unlockWithPassword.mockRejectedValueOnce(new Error("Incorrect password"));
+    prompt.mockResolvedValueOnce({ password: "wrong-password", savePassword: true });
+    await ui.promptDriveSyncUnlock();
+    expect(plugin.app.secretStorage.setSecret).not.toHaveBeenCalled();
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("updates the selected secret after correcting its password", async () => {
+    const { ui, mgr, plugin } = setup();
+    mgr.unlockWithPassword.mockRejectedValueOnce(new Error("Old password"));
+    prompt.mockResolvedValueOnce({ password: "updated-password", savePassword: true });
+    await ui.promptDriveSyncUnlock();
+    expect(plugin.app.secretStorage.setSecret).toHaveBeenCalledWith("gemihub-password", "updated-password");
+  });
+
+  it("keeps the session unlocked if saving the password fails", async () => {
+    const { ui, mgr, plugin } = setup("");
+    vi.mocked(plugin.app.secretStorage.setSecret).mockImplementation(() => { throw new Error("Storage unavailable"); });
+    prompt.mockResolvedValueOnce({ password: "verified-password", savePassword: true });
+    await ui.promptDriveSyncUnlock();
+    expect(mgr.isUnlocked).toBe(true);
+    expect(plugin.settings.driveSync.passwordSecretId).toBe("");
+    expect(prompt).toHaveBeenCalledOnce();
+  });
+
 });

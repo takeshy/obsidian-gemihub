@@ -440,33 +440,61 @@ export class DriveSyncManager {
     return drive.readFile(tokens.accessToken, fileId);
   }
 
-  /**
-   * Restore a locally-deleted file by downloading the Drive copy back into
-   * the vault. Used by the push preview to recover from an accidental
-   * local delete before the push removes the remote copy too.
-   */
-  async restoreDeletedLocally(fileId: string): Promise<string> {
-    const tokens = await this.getTokens();
-    const { accessToken, rootFolderId } = tokens;
-    const remoteMeta = await readRemoteSyncMeta(accessToken, rootFolderId);
-    const fileMeta = remoteMeta?.files[fileId];
-    if (!remoteMeta || !fileMeta) {
-      throw new Error("File not found on Drive");
+  /** Discard one push-preview change and restore the current Drive state locally. */
+  async restoreLocalChange(file: SyncFileListItem): Promise<void> {
+    if (this.syncLock) throw new Error("Sync already in progress");
+    if (!["new", "modified", "deleted", "renamed"].includes(file.type)) {
+      throw new Error("This change cannot be restored");
     }
-    const localMeta = await readLocalSyncMeta(this.app);
-    await this.downloadFile(accessToken, rootFolderId, fileId, remoteMeta, localMeta);
-    const path = localMeta.files[fileId]?.name ?? fileMeta.name;
-    const tfile = path ? this.app.vault.getAbstractFileByPath(path) : null;
-    if (tfile instanceof TFile) {
-      const entry = localMeta.files[fileId];
-      if (entry) {
-        entry.localMtime = tfile.stat.mtime;
-        entry.localSize = tfile.stat.size;
+    if (!isValidVaultPath(file.name) || this.isExcludedPath(file.name)) {
+      throw new Error("Invalid local file path");
+    }
+    this.syncLock = true;
+    try {
+      await this.waitForRefreshCounts();
+      const { accessToken, rootFolderId } = await this.getTokens();
+      const localMeta = await readLocalSyncMeta(this.app);
+      const remoteFiles = await drive.listUserFiles(accessToken, rootFolderId);
+      if (file.type === "new") {
+        // A stale preview must never discard a file that has since been synced.
+        if (localMeta.pathToId[file.name] || remoteFiles.some(remote => remote.name === file.name)) {
+          throw new Error("File is now tracked on Drive. Refresh the change list.");
+        }
+        await this.trashByPath(file.name);
+      } else {
+        const remoteFile = remoteFiles.find(remote => remote.id === file.id);
+        if (!remoteFile) throw new Error("File not found on Drive");
+        const targetPath = remoteFile.name;
+        if (!isValidVaultPath(targetPath) || this.isExcludedPath(targetPath)
+          || isGoogleWorkspaceMimeType(remoteFile.mimeType)) {
+          throw new Error("Drive file cannot be restored to the vault");
+        }
+        const targetOwner = localMeta.pathToId[targetPath];
+        if ((targetOwner && targetOwner !== file.id)
+          || (targetPath !== file.name && await this.app.vault.adapter.exists(targetPath))) {
+          throw new Error("Restore target already contains another local file");
+        }
+        const remoteMeta: SyncMeta = { lastUpdatedAt: "", files: {} };
+        upsertFileInMeta(remoteMeta, remoteFile);
+        // Download first so a failed read leaves the local rename intact.
+        await this.downloadFile(accessToken, rootFolderId, file.id, remoteMeta, localMeta);
+        const restoredFile = this.app.vault.getAbstractFileByPath(targetPath);
+        const path = restoredFile instanceof TFile ? restoredFile.path : targetPath;
+        if (targetPath !== file.name) await this.trashByPath(file.name);
+        for (const [trackedPath, id] of Object.entries(localMeta.pathToId)) {
+          if (id === file.id && trackedPath !== path) delete localMeta.pathToId[trackedPath];
+        }
+        const tfile = this.app.vault.getAbstractFileByPath(path);
+        if (tfile instanceof TFile) {
+          localMeta.files[file.id].localMtime = tfile.stat.mtime;
+          localMeta.files[file.id].localSize = tfile.stat.size;
+        }
+        await writeLocalSyncMeta(this.app, localMeta);
       }
+    } finally {
+      this.syncLock = false;
     }
-    await writeLocalSyncMeta(this.app, localMeta);
     await this.refreshSyncCounts();
-    return path;
   }
 
   /** Load remote edit history entries for a file from Google Drive. */

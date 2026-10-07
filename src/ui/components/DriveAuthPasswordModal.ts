@@ -3,18 +3,24 @@
 import { Modal, App, Setting } from "obsidian";
 import { t } from "src/i18n";
 
+export interface DriveAuthPasswordResult {
+  password: string;
+  savePassword: boolean;
+}
+
 export class DriveAuthPasswordModal extends Modal {
   private password = "";
-  private resolve: ((password: string | null) => void) | null = null;
+  private savePassword = true;
+  private resolve: ((result: DriveAuthPasswordResult | null) => void) | null = null;
 
   constructor(app: App) {
     super(app);
   }
 
   /**
-   * Open the modal and return the entered password, or null if cancelled.
+   * Open the modal and return the password and storage preference, or null if cancelled.
    */
-  openAndWait(): Promise<string | null> {
+  openAndWait(): Promise<DriveAuthPasswordResult | null> {
     return new Promise((resolve) => {
       this.resolve = resolve;
       this.open();
@@ -42,10 +48,7 @@ export class DriveAuthPasswordModal extends Modal {
         // Submit on Enter
         text.inputEl.addEventListener("keydown", (e) => {
           if (e.key === "Enter" && this.password) {
-            const resolve = this.resolve;
-            this.resolve = null; // Prevent onClose from resolving with null
-            this.close();
-            resolve?.(this.password);
+            this.submit();
           }
         });
         // Focus the input
@@ -53,17 +56,19 @@ export class DriveAuthPasswordModal extends Modal {
       });
 
     new Setting(contentEl)
+      .setName(t("driveSync.savePassword"))
+      .setDesc(t("driveSync.savePasswordDesc"))
+      .addToggle((toggle) => toggle
+        .setValue(this.savePassword)
+        .onChange((value) => { this.savePassword = value; }));
+
+    new Setting(contentEl)
       .addButton((btn) =>
         btn
           .setButtonText(t("driveSync.unlock"))
           .setCta()
           .onClick(() => {
-            if (this.password) {
-              const resolve = this.resolve;
-              this.resolve = null; // Prevent onClose from resolving with null
-              this.close();
-              resolve?.(this.password);
-            }
+            this.submit();
           })
       )
       .addButton((btn) =>
@@ -78,12 +83,22 @@ export class DriveAuthPasswordModal extends Modal {
       );
   }
 
+  private submit(): void {
+    if (!this.password) return;
+    const result = { password: this.password, savePassword: this.savePassword };
+    const resolve = this.resolve;
+    this.resolve = null;
+    this.close();
+    resolve?.(result);
+  }
+
   onClose(): void {
     // If closed without resolving (e.g., clicking X), treat as skip
     if (this.resolve) {
       this.resolve(null);
       this.resolve = null;
     }
+    this.password = "";
     this.contentEl.empty();
   }
 }
