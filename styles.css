@@ -350,18 +350,24 @@
    ======================================== */
 
 .gemihub-diff-split .gemihub-diff-split-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   border-bottom: 1px solid var(--background-modifier-border-focus);
 }
 
 .gemihub-diff-split-cell {
-  width: 50%;
+  min-width: 0;
   display: flex;
   white-space: pre;
   min-height: 1.5em;
   font-family: var(--font-monospace);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.gemihub-diff-split-cell .gemihub-diff-content {
+  white-space: break-spaces;
+  overflow-wrap: anywhere;
 }
 
 .gemihub-diff-split-left {

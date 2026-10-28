@@ -392,6 +392,49 @@ describe("resolveConflicts — pending remote deletions", () => {
   });
 });
 
+describe("resolveConflicts — pending remote renames", () => {
+  it("keeps the old local path tracked until pull applies an unrelated remote move", async () => {
+    const { manager, vault } = setup(manyFiles(1));
+    const oldPath = "kakeratta-basic.md";
+    const newPath = "promotions/kakeratta/kakeratta-basic.md";
+    const content = "unchanged article";
+    vault.setFile(oldPath, content);
+    const moved = fake.__put(newPath, content, "moved-id");
+    const localMeta = readLocalMeta(vault);
+    localMeta.pathToId[oldPath] = moved.id;
+    localMeta.files[moved.id] = {
+      name: oldPath,
+      md5Checksum: md5HashString(content),
+      modifiedTime: "2026-07-01T00:00:00.000Z",
+    };
+    vault.setFile(getLocalMetaPath(), JSON.stringify(localMeta));
+    const remoteMeta = JSON.parse(fake.__state.contents.get(META_FILE_ID) as string) as SyncMeta;
+    remoteMeta.files[moved.id] = {
+      name: newPath, mimeType: "text/markdown",
+      md5Checksum: md5HashString(content), modifiedTime: "2026-08-01T00:00:00.000Z",
+    };
+    fake.__state.contents.set(META_FILE_ID, JSON.stringify(remoteMeta));
+
+    await manager.resolveConflicts(manager.conflicts.map(c => c.fileId), "remote");
+
+    const meta = readLocalMeta(vault);
+    expect(meta.pathToId[oldPath]).toBe(moved.id);
+    expect(meta.pathToId[newPath]).toBeUndefined();
+    expect(meta.files[moved.id]).toEqual(localMeta.files[moved.id]);
+    expect(vault.has(oldPath)).toBe(true);
+
+    // After resolution, the move must still be visible to pull, and the old
+    // copy must never appear as a brand-new upload.
+    const reader = manager as unknown as { readReconciledRemoteMeta: () => Promise<SyncMeta> };
+    vi.spyOn(reader, "readReconciledRemoteMeta").mockResolvedValue(remoteMeta);
+    const push = await manager.computeSyncFileList("push");
+    expect(push.files.some(file => file.name === oldPath)).toBe(false);
+    expect(push.hasRemoteChanges).toBe(true);
+    const pull = await manager.computeSyncFileList("pull");
+    expect(pull.files.some(file => file.id === moved.id)).toBe(true);
+  });
+});
+
 describe("resolveConflicts — failure handling", () => {
   it("keeps conflicts unresolved when metadata persistence fails", async () => {
     const { manager, state } = setup(manyFiles(2));
